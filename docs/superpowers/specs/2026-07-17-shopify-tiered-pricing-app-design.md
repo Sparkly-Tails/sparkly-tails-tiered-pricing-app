@@ -4,13 +4,20 @@
 **Status:** Approved, ready for implementation planning
 **Store:** Sparkly Tails (`sparklytails.com`) — Shopify **Basic** plan, GBP, Europe/London
 
+> **Revision (2026-07-17):** Two decisions changed after initial approval, based on
+> user feedback: (1) §2.5 now uses Shopify's native Google & YouTube channel instead
+> of a custom feed — this removes the feed-price-mismatch risk and an entire phase
+> of work; (2) the admin UI computes real per-product resulting prices from each
+> product's actual Shopify price (§4), never a placeholder.
+
 ---
 
 ## 1. Purpose
 
 Give customers volume pricing on voucher products (e.g. 1 × £1.70, 5+ × £1.45,
-10+ × £1.40), show those tiers on the product page with the price updating live as
-quantity changes, and advertise the tiers in Google Shopping.
+10+ × £1.40), and show those tiers on the product page with the price updating live
+as quantity changes. Google Shopping listings continue to sync via Shopify's native
+Google & YouTube channel, unaffected by this app (§2.5).
 
 Built as a private Shopify app for Sparkly Tails only. It may later be published to
 the Shopify App Store as a commercial app, so the design keeps that path open — but
@@ -131,12 +138,20 @@ Inventory tracking — explicitly the most important requirement — is satisfie
 free: the thing sold *is* the actual product, so Shopify decrements real stock with
 no code.
 
-### 2.5 Google feed: app-generated
+### 2.5 Google Shopping: Shopify's native Google & YouTube channel
 
-The app generates its own feed rather than using Shopify's Google channel, because
-the channel auto-generates each product's own URL and cannot emit the `?qty=5` deep
-link that makes the feed price match the landing price. Generating the feed also
-means no phantom products in the catalogue.
+No custom feed is built. Google Shopping listings are synced via Shopify's native
+**Google & YouTube** sales channel, the same as any other product on the store.
+
+This means Google Shopping shows each product's real, undiscounted base price —
+tiered pricing does not appear as a separate "5 for £X" multipack offer in ads. That
+trade-off is accepted deliberately: it removes an entire class of risk (a feed row
+priced differently from the product's real landing price is exactly what triggers
+Merchant Center's price-mismatch disapproval), removes an entire phase of work, and
+needs zero code from this app. If bulk-price ad callouts are wanted later, the
+reversible path is
+[Google Merchant Promotions](https://support.google.com/merchants/answer/2906014) —
+a promotion badge layered on the existing native listing, not a new priced offer.
 
 ### 2.6 Storage: metafields, no database
 
@@ -164,19 +179,19 @@ single-store private app. Adding a token collection later is a contained change.
 │  shop.sparkly_tiers.config    → groups, tiers, products │
 │  shop.sparkly_tiers.settings  → copy + CSS              │
 │  product.sparkly_tiers.tiers  → denormalised for widget │
-└──────┬──────────────────┬───────────────────┬───────────┘
-       │ app reconciles   │ Liquid reads      │ feed reads
-       ▼                  ▼                   ▼
-┌─ AUTOMATIC ─┐  ┌─ THEME APP ────┐  ┌─ FEED ENDPOINT ───┐
-│  DISCOUNTS  │  │  EXTENSION     │  │  /feed/google.xml │
-│  3 per prod │  │  tier table +  │  │  rows w/ ?qty=5   │
-│  real price │  │  live price JS │  │  → Merchant Ctr   │
-└─────────────┘  └────────────────┘  └───────────────────┘
+└──────┬──────────────────┬───────────────────────────────┘
+       │ app reconciles   │ Liquid reads
+       ▼                  ▼
+┌─ AUTOMATIC ─┐  ┌─ THEME APP ────┐        Google Shopping ads sync via
+│  DISCOUNTS  │  │  EXTENSION     │        Shopify's native Google & YouTube
+│  per product│  │  tier table +  │        channel — no code in this app.
+│  real price │  │  live price JS │        See §2.5.
+└─────────────┘  └────────────────┘
 ```
 
-Metafields are the only state. Discounts, widget, and feed are **projections** of
-them. This is what makes the eventual native→Function engine swap a contained change:
-it replaces one projection and touches nothing else.
+Metafields are the only state. Discounts and widget are **projections** of them.
+This is what makes the eventual native→Function engine swap a contained change: it
+replaces one projection and touches nothing else.
 
 ### Units and boundaries
 
@@ -186,11 +201,11 @@ it replaces one projection and touches nothing else.
 | `lib/reconciler` | diff desired vs actual → actions | `tier-math` (pure) |
 | `lib/shopify-discounts` | execute actions via Admin GraphQL | Shopify API |
 | `lib/metafields` | read/write config, settings, per-product tiers | Shopify API |
-| `lib/feed` | build feed XML from config | `tier-math` (pure) |
+| `lib/products` | read a product's real base price | Shopify API |
 | Admin UI | groups, product assignment, settings, slot meter | all of the above |
-| Theme app extension | render tiers, live price, `?qty=` | product metafield only |
+| Theme app extension | render tiers, live price | product metafield only |
 
-`tier-math`, `reconciler`, and `feed` are pure and testable without Shopify. That is
+`tier-math` and `reconciler` are pure and testable without Shopify. That is
 deliberate: it is where every money bug would otherwise hide.
 
 ---
@@ -319,8 +334,8 @@ Draft groups write config but create no discounts; going live runs the reconcile
 
 An **app block** placed in the product section via the theme editor. Reads
 `product.sparkly_tiers.tiers` in **Liquid** — server-rendered, correct on first paint.
-JS handles only the interactive parts: quantity changes and the `?qty=N` deep link,
-recomputing the displayed price client-side using the same math as `tier-math`.
+JS handles only the interactive part: recomputing the displayed price client-side as
+quantity changes, using the same math as `tier-math`.
 
 Styling comes from `shop.sparkly_tiers.settings`, injected as CSS custom properties so
 theme fonts inherit naturally.
@@ -329,22 +344,10 @@ theme fonts inherit naturally.
 (§2.3) is what makes the prediction exactly mirror reality. Widget and reconciler are
 tested against shared fixtures to keep them in sync.
 
-### 5.4 Feed endpoint
+### 5.4 Google Shopping
 
-A **public** route (`/feed/google.xml`), exempt from the `?stt=` proxy guard because
-Merchant Center fetches it unauthenticated. It exposes only already-public catalogue
-data. **Stateless** — every fetch reads metafields live and regenerates, so the feed
-cannot drift from config.
-
-```xml
-<item>
-  <g:id>chicken-voucher-qty5</g:id>
-  <g:title>Chicken Voucher — 5 pack</g:title>
-  <g:price>7.25 GBP</g:price>
-  <g:multipack>5</g:multipack>
-  <link>https://sparklytails.com/products/chicken-voucher?qty=5</link>
-</item>
-```
+No app component. Handled entirely by Shopify's native Google & YouTube sales
+channel — see §2.5.
 
 ---
 
@@ -363,7 +366,7 @@ Per the `shopify-app-auth` skill (v2.0.0), unchanged:
   Scopes are set in `auth/start`, not the Partners dashboard, and changing them
   requires reinstall — so they are set generously up front.
 
-Exempt from the proxy guard: `/api/auth/*`, `/api/webhooks/*`, `/feed/*`, `/_next/*`.
+Exempt from the proxy guard: `/api/auth/*`, `/api/webhooks/*`, `/_next/*`.
 
 ---
 
@@ -371,20 +374,15 @@ Exempt from the proxy guard: `/api/auth/*`, `/api/webhooks/*`, `/feed/*`, `/_nex
 
 | Phase | Ships | Proves |
 |---|---|---|
-| **0 — Spike** | One hand-built feed row submitted to Merchant Center | Whether the feed approach is viable at all |
 | **1 — Engine** | Tier groups, reconciler, slot meter, admin UI | Real tier prices at checkout |
-| **2 — Storefront** | Theme app extension, tier table, `?qty=` | Customers see and get the tiers |
-| **3 — Feed** | Feed generator | Google ads can run |
+| **2 — Storefront** | Theme app extension, tier table | Customers see and get the tiers |
 | **Later** | Publish to App Store → swap engine to a Function | Removes the 25-slot cap |
 
-Phase 0 runs first because it is the cheapest step and the only one that can
-invalidate a later phase.
+Google Shopping needs no phase of its own — it is Shopify's native Google & YouTube
+channel, unaffected by anything this app builds (§2.5).
 
-> **Planning scope.** This spec covers all four phases, but a single implementation
-> plan should cover **Phase 0 and Phase 1 only**. Phase 0's result determines whether
-> Phase 3 is built as designed or replaced by the Merchant Promotions fallback (§9),
-> so planning Phase 3 in detail before that answer is known would be wasted work.
-> Phases 2 and 3 get their own plans once Phase 1 lands.
+> **Planning scope.** A single implementation plan should cover **Phase 1 only**.
+> Phase 2 (the storefront widget) gets its own plan once Phase 1 lands.
 
 ---
 
@@ -397,7 +395,6 @@ Pure units carry the correctness burden:
 - **`reconciler`** — tier add/remove/change, product assign/unassign, group
   draft/live/delete, idempotency (second run is a no-op), drift-heal, slot-budget
   refusal (all-or-nothing, never partial).
-- **`feed`** — row generation, `?qty=` link construction, price × quantity.
 - **Widget** — same fixtures as the reconciler, asserting predicted price equals the
   price the reconciler's discount would produce.
 
@@ -411,12 +408,16 @@ at checkout.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| **Feed price mismatch** — theme JSON-LD says £1.70, feed says £7.25; Merchant Center may disapprove | **High** | **Phase 0 spike gates all feed work.** Fallback: [Google Merchant Promotions](https://support.google.com/merchants/answer/2906014) — attaches a "Buy 5+, save 15%" badge to the normal listing. No fake multipack offers, no price mismatch possible, and Google's intended mechanism for quantity discounts. |
 | **25-slot cap** → ~8 products | Medium | Slot meter; refuse rather than half-apply; publish→Function removes it |
 | **Max products-per-discount** is undocumented | Low | Validate in Phase 1. With per-product scoping each discount targets exactly one product, so this is unlikely to bind at all |
 | **Widget predicts ≠ Shopify decides** | Medium | Per-product semantics; shared test fixtures |
 | **Rounding** (14.7% of £1.70 = £1.4501) | Medium | UI shows actual resulting price per product before save |
 | **Token in env, no DB** → reinstall needs manual re-paste | Low | Accepted trade-off; adding a token collection later is contained |
+
+**Accepted trade-off:** Google Shopping ads show each product's real base price, not
+a "5 for £X" bulk callout — a direct consequence of §2.5's choice to use Shopify's
+native channel instead of a custom feed. Reversible later via Google Merchant
+Promotions if bulk-price ad callouts become a priority.
 
 ---
 
@@ -428,3 +429,5 @@ at checkout.
 - Multi-shop token storage (single store; needed only if published)
 - Mix-and-match tier groups (§2.3 — rejected for widget correctness)
 - Minimum *purchase amount* tiers — only minimum *quantity* tiers are in scope
+- A custom Google Merchant feed, multipack feed rows, and any `?qty=` deep link
+  (§2.5 — superseded by using Shopify's native Google & YouTube channel)

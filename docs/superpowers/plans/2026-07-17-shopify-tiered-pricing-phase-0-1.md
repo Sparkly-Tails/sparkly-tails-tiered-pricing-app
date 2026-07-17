@@ -1,10 +1,10 @@
-# Shopify Tiered Pricing App — Phase 0 + Phase 1 Implementation Plan
+# Shopify Tiered Pricing App — Phase 1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Validate the Google Merchant Center feed approach (Phase 0), then build the tiered-pricing discount engine — a Next.js admin app that lets Sparkly Tails define per-product volume-price tiers and reconciles them into real Shopify automatic discounts (Phase 1).
+**Goal:** Build the tiered-pricing discount engine — a Next.js admin app that lets Sparkly Tails define per-product volume-price tiers, computes real resulting prices from each product's actual Shopify price, and reconciles the tiers into real Shopify automatic discounts.
 
-**Architecture:** A Next.js 16 App Router app, embedded in the Shopify admin via the proven stateless `?stt=` auth pattern (Partners development app, OAuth, no database — the access token lives in an env var). Business data lives entirely in a shop metafield. Three pure, Shopify-free libraries (`tier-math`, `reconciler`, plus the pure parts of the Shopify client) carry all pricing correctness and are TDD'd in isolation; a thin `shopify-discounts` layer executes the reconciler's decisions as GraphQL mutations. The admin UI is server-rendered pages reading/writing the metafield through Server Actions.
+**Architecture:** A Next.js 16 App Router app, embedded in the Shopify admin via the proven stateless `?stt=` auth pattern (Partners development app, OAuth, no database — the access token lives in an env var). Business data lives entirely in a shop metafield. Two pure, Shopify-free libraries (`tier-math`, `reconciler`) carry all pricing correctness and are TDD'd in isolation; a thin `shopify-discounts` layer executes the reconciler's decisions as GraphQL mutations, and a `products` lookup supplies each product's real Shopify price so tier prices are never placeholders. The admin UI is server-rendered pages reading/writing the metafield through Server Actions. Google Shopping needs no code here — it's handled entirely by Shopify's native Google & YouTube sales channel.
 
 **Tech Stack:** Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4, Vitest (unit tests — chosen over Jest because the codebase is pure ESM/TypeScript with no need for Jest's CommonJS-era config), Shopify Admin GraphQL API 2025-10, Vercel.
 
@@ -12,7 +12,7 @@
 
 These apply to every task below; re-stated here so no single task can be reviewed in isolation from them.
 
-- **No database.** All business data lives in Shopify metafields. The Shopify access token lives in the `SHOPIFY_ACCESS_TOKEN` env var (set manually after OAuth — see Task 8), not MongoDB.
+- **No database.** All business data lives in Shopify metafields. The Shopify access token lives in the `SHOPIFY_ACCESS_TOKEN` env var (set manually after OAuth — see Task 2's `auth/callback`), not MongoDB.
 - **Auth pattern is exact, not "similar to."** Stateless `?stt=` URL/header token, 10-minute TTL, no cookies, no App Bridge. `src/proxy.ts` (not `middleware.ts` — Next.js 16 renamed the export). Every internal link uses `AuthLink`, enforced by an ESLint `no-restricted-imports` rule. This is copied near-verbatim from the working `sparkly-tails-pickup-app` repo, which has already ruled out cookies and App Bridge on real hardware — do not re-litigate that decision.
 - **`auth/start` has exactly one job:** verify HMAC, redirect to OAuth. No session/skip-OAuth logic belongs there — that lives in `proxy.ts`.
 - **`auth/callback` redirects to `https://${shop}/admin`**, never back to the app's own URL.
@@ -28,100 +28,6 @@ These apply to every task below; re-stated here so no single task can be reviewe
 - Node 20.20.2 is the target runtime (confirmed installed).
 
 ---
-
-## Part A: Phase 0 — Merchant Center Feed Spike
-
-This is a human-in-the-loop investigation, not a coding task. It exists because the spec (§9) flags a real, currently-unknown risk: Google Merchant Center may disapprove a feed row whose price (£7.25 for 5 units) doesn't match the price your theme's product-page JSON-LD reports (£1.70 per unit). This is cheap to test and expensive to discover after Phase 3 is built, so it runs first and gates Phase 3 planning — not Phase 1, which proceeds regardless of the outcome.
-
-### Task 0: Manually submit one feed row to Google Merchant Center and record the result
-
-**Files:**
-- Create: `docs/superpowers/plans/phase-0-spike-result.md`
-
-**Interfaces:**
-- Consumes: nothing (no code dependency)
-- Produces: a written, dated verdict (`approved` / `disapproved` / `pending`) that Phase 3 planning will read before it starts. Phase 1 does not depend on this result and proceeds in parallel or beforehand.
-
-- [ ] **Step 1: Confirm Merchant Center access**
-
-You need an existing Google Merchant Center account linked to `sparklytails.com`, with at least one product already synced (via the existing Shopify Google & YouTube channel or a manual feed), so you have a baseline of what an *approved* listing looks like for comparison.
-
-If there's no Merchant Center account yet, create one at [merchants.google.com](https://merchants.google.com) and complete website-claiming for `sparklytails.com` before continuing — this step has no code shortcut.
-
-- [ ] **Step 2: Pick one real product and record its current landing-page price**
-
-Choose a product that will eventually get tiered pricing (e.g. an existing voucher/subscription product). Open its live product page and record:
-
-- The displayed price (e.g. `£1.70`)
-- The price shown in its JSON-LD structured data. Find this by viewing page source and searching for `application/ld+json`, or running in the browser console on the product page:
-
-```js
-[...document.querySelectorAll('script[type="application/ld+json"]')]
-  .map(s => JSON.parse(s.textContent))
-```
-
-Look for an `offers.price` field. Write both numbers down in `docs/superpowers/plans/phase-0-spike-result.md`.
-
-- [ ] **Step 3: Hand-build one supplemental feed row for a 5-unit tier**
-
-In Merchant Center, go to **Products → Feeds** and create a new **supplemental feed** (a small manually-uploaded feed that layers on top of your primary feed) named `tier-pricing-spike`. Use a plain-text/TSV feed with one data row plus header, matching [Google's product data specification](https://support.google.com/merchants/answer/7052112):
-
-```
-id	title	link	price	availability	condition	brand
-sparklytails-voucher-qty5	<Product name> — 5 pack	https://sparklytails.com/products/<handle>?qty=5	7.25 GBP	in stock	new	Sparkly Tails
-```
-
-Replace `<Product name>` and `<handle>` with the real product you picked in Step 2. `7.25 GBP` should be 5 × the intended tier price (e.g. 5 × £1.45).
-
-Upload this as a one-off manual fetch (Merchant Center supports "Upload now" for a manually-hosted file, or paste-based upload for supplemental feeds — use whichever your Merchant Center UI offers without requiring code).
-
-- [ ] **Step 4: Wait for processing and read the diagnostics**
-
-Merchant Center typically processes new feed items within a few hours. Check back and go to **Products → Diagnostics**, filtering to the `tier-pricing-spike` feed. Look specifically for:
-
-- `Price mismatch` or `Landing page price mismatch` issues
-- Any `Disapproved` status on the item
-- The exact wording of any warning, even if the item is only "under review" rather than fully disapproved
-
-- [ ] **Step 5: Record the verdict**
-
-Write the result to `docs/superpowers/plans/phase-0-spike-result.md`:
-
-```markdown
-# Phase 0 Spike Result
-
-**Date tested:** <date>
-**Product used:** <product name/handle>
-**Landing page price (visible + JSON-LD):** £X.XX
-**Feed row submitted:** id=sparklytails-voucher-qty5, price=£7.25, link=?qty=5
-
-## Verdict
-
-<APPROVED | DISAPPROVED | STILL PENDING AFTER 48H>
-
-## Diagnostic detail
-
-<paste the exact Merchant Center diagnostic message, or "none — approved cleanly">
-
-## Implication for Phase 3
-
-<If APPROVED: proceed with the app-generated feed as designed in the spec §5.4.>
-<If DISAPPROVED: Phase 3 must use Google Merchant Promotions
- (https://support.google.com/merchants/answer/2906014) instead of multipack
- feed rows — a promotion badge on the normal-priced listing rather than a
- separate discounted offer, which cannot trigger a price-mismatch check.>
-```
-
-- [ ] **Step 6: Commit the result**
-
-```bash
-git add docs/superpowers/plans/phase-0-spike-result.md
-git commit -m "Record Phase 0 Merchant Center feed spike result"
-```
-
----
-
-## Part B: Phase 1 — Discount Engine
 
 ### File Structure
 
@@ -145,27 +51,29 @@ sparkly-tails-tiered-pricing-app/
       tier-math.ts                    # Task 6 — pure pricing math
       reconciler.ts                   # Task 7 — pure diff → actions
       shopify-discounts.ts            # Task 8 — actions → GraphQL mutations
+      products.ts                      # Task 9 — real product base price lookup
     components/
       AuthTokenInit.tsx                # Task 3
       AuthLink.tsx                     # Task 3
     app/
       layout.tsx                       # Task 3 — mounts AuthTokenInit
-      page.tsx                         # Task 9 — groups list (home)
+      page.tsx                         # Task 10 — groups list (home)
       globals.css                      # Task 1
       groups/
-        new/page.tsx                   # Task 10 — create group form
-        [groupId]/page.tsx              # Task 11 — edit group, assign products, slot meter
+        new/page.tsx                   # Task 11 — create group form
+        [groupId]/page.tsx              # Task 12 — edit group, assign products, slot meter, real per-product prices
       api/
         auth/
           start/route.ts               # Task 2
           callback/route.ts            # Task 2
         debug/route.ts                 # Task 2 — dev-only state inspector
     actions/
-      groupActions.ts                  # Task 10, 11 — Server Actions: create/update/delete group, assign products, go live
+      groupActions.ts                  # Task 11, 12 — Server Actions: create/update/delete group, assign products, go live
   tests/
     lib/
       tier-math.test.ts                # Task 6
       reconciler.test.ts               # Task 7
+      products.test.ts                 # Task 9
     fixtures/
       groups.ts                        # Task 7 — shared test fixtures
 ```
@@ -182,7 +90,7 @@ sparkly-tails-tiered-pricing-app/
 - Create: `vitest.config.ts`
 - Create: `.env.local.example`
 - Create: `src/app/layout.tsx` (minimal placeholder — replaced in Task 3)
-- Create: `src/app/page.tsx` (minimal placeholder — replaced in Task 9)
+- Create: `src/app/page.tsx` (minimal placeholder — replaced in Task 10)
 - Create: `src/app/globals.css`
 - Create: `.gitignore` (already exists — extend it)
 
@@ -1152,7 +1060,7 @@ git commit -m "Add Shopify Admin GraphQL client"
   - `type Config = { groups: TierGroup[] }`
   - `getConfig(): Promise<Config>`
   - `saveConfig(config: Config): Promise<void>`
-  - `syncProductTiers(productId: string, groupId: string | null, config: Config): Promise<void>` — used by Task 7's `apply()` step to keep `product.sparkly_tiers.tiers` denormalised data current.
+  - `syncProductTiers(productId: string, productTiers: DenormalisedProductTier | null): Promise<void>` — used by Task 12's `setGroupStatus` to keep `product.sparkly_tiers.tiers` denormalised data current, with real per-product prices computed via Task 9's `getProductInfo` and Task 6's `resultingPrice`.
 
   These types are the single definition every later task imports — do not redeclare `TierGroup` or `Config` anywhere else.
 
@@ -1328,13 +1236,16 @@ export async function saveConfig(config: Config): Promise<void> {
 
 export interface DenormalisedProductTier {
   groupId: string
+  basePrice: string
   tiers: { minQty: number; unitPrice: string }[]
 }
 
 /**
  * Rewrites the product's own tier metafield so the storefront widget (a
  * separate Phase 2 project) can render tiers in Liquid with no API call.
- * Called by the reconciler's apply() step after every config change.
+ * Called by setGroupStatus (Task 12) after every config change, using the
+ * product's real base price (Task 9) and tier-math's resultingPrice (Task 6)
+ * to compute basePrice/unitPrice — never a placeholder.
  * Pass `productTiers: null` to clear a product's tiers (e.g. when it's
  * removed from a group).
  */
@@ -1402,7 +1313,7 @@ This is the task with the highest money-bug risk in the whole plan — see the s
   - `percentOffFromTargetPrice(basePrice: number, targetPrice: number): number` — returns a **percentage** (e.g. `14.7`), rounded to 1 decimal place
   - `resultingPrice(basePrice: number, percentOff: number): number` — returns the actual price after Shopify-style rounding (2 decimal places, standard rounding), given a **percentage**
   - `percentageToShopifyFraction(percentOff: number): number` — the ONLY place `percentOff / 100` happens; returns a fraction like `0.147` for use in `customerGets.value.percentage`
-  - These three functions are what Task 7 (reconciler) and Task 11 (admin UI) both call — never recompute this math elsewhere.
+  - These three functions are what Task 7 (reconciler) and Task 12 (admin UI) both call — never recompute this math elsewhere.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2209,14 +2120,140 @@ git commit -m "Add Shopify discount execution layer"
 
 ---
 
-### Task 9: Groups list page (admin home)
+### Task 9: Product price lookup
+
+Real per-product prices matter because target prices are entered as percent-off (Task 6), and the resulting price only means something once it's applied to a product's actual Shopify price — never a stand-in example. This task is what lets Task 12 replace an example/placeholder price with the real one.
+
+**Files:**
+- Create: `src/lib/products.ts`
+- Test: `tests/lib/products.test.ts`
+
+**Interfaces:**
+- Consumes: `shopifyQuery` from `@/lib/shopify-client` (Task 4)
+- Produces: `getProductInfo(productId: string): Promise<{ title: string; basePrice: number } | null>` — returns `null` if the product doesn't exist (e.g. a stale/typo'd gid in a group's product list). Used by Task 12's `setGroupStatus` and its group editor page to compute real per-product resulting prices. Assumes a single-variant product (the first variant's price) — consistent with this app's per-product tier scoping (spec §2.3). Multi-variant tiering is out of scope for Phase 1.
+
+- [ ] **Step 1: Write the failing test**
+
+```typescript
+// tests/lib/products.test.ts
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { getProductInfo } from '@/lib/products'
+import * as shopifyClient from '@/lib/shopify-client'
+
+describe('getProductInfo', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  it('returns title and base price parsed from the first variant', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      product: {
+        title: 'Chicken Voucher',
+        variants: { edges: [{ node: { price: '1.70' } }] },
+      },
+    })
+
+    const result = await getProductInfo('gid://shopify/Product/111')
+    expect(result).toEqual({ title: 'Chicken Voucher', basePrice: 1.70 })
+  })
+
+  it('returns null when the product does not exist', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({ product: null })
+
+    const result = await getProductInfo('gid://shopify/Product/999')
+    expect(result).toBeNull()
+  })
+
+  it('returns null when the product has no variants', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      product: { title: 'Empty Product', variants: { edges: [] } },
+    })
+
+    const result = await getProductInfo('gid://shopify/Product/222')
+    expect(result).toBeNull()
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+npm test -- tests/lib/products.test.ts
+```
+
+Expected: FAIL — `Cannot find module '@/lib/products'`.
+
+- [ ] **Step 3: Write products.ts**
+
+```typescript
+// src/lib/products.ts
+import { shopifyQuery } from '@/lib/shopify-client'
+
+export interface ProductInfo {
+  title: string
+  basePrice: number
+}
+
+/**
+ * Fetches a product's title and real base price (the first variant's
+ * price). Assumes a single-variant product — consistent with this app's
+ * per-product tier scoping (spec §2.3); multi-variant tiering is out of
+ * scope for Phase 1. Returns null if the product doesn't exist or has no
+ * variants, so callers (Task 12) can skip a stale product id rather than
+ * crash.
+ */
+export async function getProductInfo(productId: string): Promise<ProductInfo | null> {
+  const data = await shopifyQuery<{
+    product: {
+      title: string
+      variants: { edges: { node: { price: string } }[] }
+    } | null
+  }>(
+    `query getProductInfo($id: ID!) {
+      product(id: $id) {
+        title
+        variants(first: 1) {
+          edges { node { price } }
+        }
+      }
+    }`,
+    { id: productId },
+  )
+
+  if (!data.product) return null
+  const firstVariant = data.product.variants.edges[0]?.node
+  if (!firstVariant) return null
+
+  return {
+    title: data.product.title,
+    basePrice: parseFloat(firstVariant.price),
+  }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+```bash
+npm test -- tests/lib/products.test.ts
+```
+
+Expected: PASS, 3 tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/lib/products.ts tests/lib/products.test.ts
+git commit -m "Add product price lookup for real per-product tier pricing"
+```
+
+---
+
+### Task 10: Groups list page (admin home)
 
 **Files:**
 - Create: `src/app/page.tsx` (replaces Task 1 placeholder)
 
 **Interfaces:**
 - Consumes: `getConfig` from `@/lib/metafields` (Task 5); `AuthLink` from `@/components/AuthLink` (Task 3)
-- Produces: the app's home route, linked to by nothing yet (it's the root) but linking to `/groups/new` (Task 10) and `/groups/[groupId]` (Task 11)
+- Produces: the app's home route, linked to by nothing yet (it's the root) but linking to `/groups/new` (Task 11) and `/groups/[groupId]` (Task 12)
 
 - [ ] **Step 1: Write the page**
 
@@ -2291,7 +2328,7 @@ git commit -m "Add tier groups list page"
 
 ---
 
-### Task 10: Create group Server Action + form
+### Task 11: Create group Server Action + form
 
 **Files:**
 - Create: `src/actions/groupActions.ts`
@@ -2299,7 +2336,7 @@ git commit -m "Add tier groups list page"
 
 **Interfaces:**
 - Consumes: `getConfig`, `saveConfig`, `type TierGroup` from `@/lib/metafields` (Task 5); `redirectWithToken` from `@/lib/auth-redirect` (Task 3)
-- Produces: `createGroup(formData: FormData): Promise<void>` — a Server Action, exported for reuse by Task 11's tests if needed. Groups are created in `status: 'draft'` — reconciliation only happens when a group goes live (Task 11).
+- Produces: `createGroup(formData: FormData): Promise<void>` — a Server Action, exported for reuse by Task 12's tests if needed. Groups are created in `status: 'draft'` — reconciliation only happens when a group goes live (Task 12).
 
 - [ ] **Step 1: Write groupActions.ts with the create action**
 
@@ -2432,16 +2469,16 @@ git commit -m "Add create-group Server Action and form"
 
 ---
 
-### Task 11: Group editor — product assignment, slot meter, go-live reconciliation
+### Task 12: Group editor — product assignment, slot meter, go-live reconciliation, real per-product prices
 
-This is where the reconciler (Task 7) and executor (Task 8) actually get invoked from the UI for the first time. Going live runs `reconcile()` then `applyActions()`, then writes the returned discount ids back into `Config` and calls `syncProductTiers` for every affected product.
+This is where the reconciler (Task 7), executor (Task 8), and product price lookup (Task 9) actually get invoked from the UI for the first time. Going live runs `reconcile()` then `applyActions()`, then writes the returned discount ids back into `Config` and calls `syncProductTiers` for every affected product — using each product's real Shopify price, never a placeholder.
 
 **Files:**
 - Modify: `src/actions/groupActions.ts` (add `updateGroup`, `assignProducts`, `setGroupStatus`)
 - Create: `src/app/groups/[groupId]/page.tsx`
 
 **Interfaces:**
-- Consumes: everything from Tasks 5, 6, 7, 8, plus `createGroup` context from Task 10
+- Consumes: everything from Tasks 5, 6, 7, 8, 9, plus `createGroup` context from Task 11
 - Produces: `setGroupStatus(groupId: string, status: 'draft' | 'live'): Promise<void>` — the function that performs reconciliation; this is the end of the Phase 1 chain, nothing later consumes it within this plan (Phase 2's storefront widget reads `product.sparkly_tiers.tiers` directly, written by this action via `syncProductTiers`)
 
 - [ ] **Step 1: Add the remaining Server Actions to groupActions.ts**
@@ -2455,6 +2492,7 @@ import { reconcile } from '@/lib/reconciler'
 import { listActualDiscounts, applyActions } from '@/lib/shopify-discounts'
 import { syncProductTiers } from '@/lib/metafields'
 import { resultingPrice } from '@/lib/tier-math'
+import { getProductInfo } from '@/lib/products'
 
 export async function assignProducts(groupId: string, formData: FormData): Promise<void> {
   const productIdsRaw = String(formData.get('productIds') ?? '')
@@ -2523,15 +2561,27 @@ export async function setGroupStatus(groupId: string, status: 'draft' | 'live'):
   await saveConfig(config)
 
   // Rewrite the denormalised per-product metafield for every product
-  // touched by this status change, so the storefront widget (Phase 2)
-  // reads current data.
+  // touched by this status change, using each product's REAL base price
+  // (Task 9) and tier-math's resultingPrice (Task 6) — never a
+  // placeholder. If a product id is stale (getProductInfo returns null —
+  // e.g. a deleted product or a typo'd gid pasted into the product list),
+  // that single product's metafield sync is skipped rather than failing
+  // the whole operation: the discount reconciliation above has already
+  // succeeded and is the real pricing engine, so a decorative
+  // storefront-widget metafield for one bad id shouldn't roll it back.
   for (const productId of group.productIds) {
     if (group.status === 'live') {
+      const info = await getProductInfo(productId)
+      if (!info) {
+        console.error(`[setGroupStatus] skipping product tier sync: ${productId} not found`)
+        continue
+      }
       await syncProductTiers(productId, {
         groupId: group.id,
+        basePrice: info.basePrice.toFixed(2),
         tiers: group.tiers.map((t) => ({
           minQty: t.minQty,
-          unitPrice: '0.00', // Phase 1 has no base-price lookup yet; Task 11 Step 4 below computes real values in the UI. Storefront rendering is a Phase 2 concern.
+          unitPrice: resultingPrice(info.basePrice, t.percentOff).toFixed(2),
         })),
       })
     } else {
@@ -2543,8 +2593,6 @@ export async function setGroupStatus(groupId: string, status: 'draft' | 'live'):
 }
 ```
 
-> **Note on the placeholder `unitPrice: '0.00'` above:** Phase 1's scope is the discount engine and admin UI, not the storefront widget (Phase 2). The denormalised product metafield's `unitPrice` field is written as a placeholder here because computing it requires fetching each product's real base price from Shopify — out of scope until Phase 2 defines exactly how the widget consumes this data. This is intentionally visible (not hidden in a TODO comment) so Phase 2's plan must explicitly address it before the storefront can render correct prices.
-
 - [ ] **Step 2: Write the group editor page**
 
 ```tsx
@@ -2553,6 +2601,7 @@ import { headers } from 'next/headers'
 import { notFound } from 'next/navigation'
 import { getConfig } from '@/lib/metafields'
 import { resultingPrice } from '@/lib/tier-math'
+import { getProductInfo } from '@/lib/products'
 import { assignProducts, setGroupStatus } from '@/actions/groupActions'
 
 const MAX_ACTIVE_DISCOUNTS = 25
@@ -2579,10 +2628,17 @@ export default async function GroupPage({
   const goLive = setGroupStatus.bind(null, groupId, 'live')
   const goDraft = setGroupStatus.bind(null, groupId, 'draft')
 
-  // Example base price for preview purposes only — Phase 2 will read real
-  // per-product base prices. Shown here so target-price rounding (spec §4)
-  // is visible before the group goes live.
-  const examplePrice = 1.70
+  // Real per-product pricing preview: fetch each assigned product's actual
+  // Shopify price (Task 9) so the table below shows the exact resulting
+  // price the discount will produce — never an example or placeholder. A
+  // stale product id (deleted product, typo) resolves to null and is
+  // shown as a visible warning row instead of crashing the page.
+  const productPreviews = await Promise.all(
+    group.productIds.map(async (productId) => ({
+      productId,
+      info: await getProductInfo(productId),
+    })),
+  )
 
   return (
     <main className="p-8 max-w-2xl mx-auto">
@@ -2599,7 +2655,6 @@ export default async function GroupPage({
             <tr className="text-left border-b">
               <th className="py-1">Min qty</th>
               <th className="py-1">% off</th>
-              <th className="py-1">Resulting price (example, £{examplePrice.toFixed(2)} base)</th>
             </tr>
           </thead>
           <tbody>
@@ -2607,11 +2662,50 @@ export default async function GroupPage({
               <tr key={tier.minQty} className="border-b">
                 <td className="py-1">{tier.minQty}+</td>
                 <td className="py-1">{tier.percentOff}%</td>
-                <td className="py-1">£{resultingPrice(examplePrice, tier.percentOff).toFixed(2)}</td>
               </tr>
             ))}
           </tbody>
         </table>
+      </section>
+
+      <section className="mb-8">
+        <h2 className="font-medium mb-2">Resulting prices by product</h2>
+        {productPreviews.length === 0 ? (
+          <p className="text-sm text-gray-500">No products assigned yet.</p>
+        ) : (
+          <table className="w-full text-sm border-collapse">
+            <thead>
+              <tr className="text-left border-b">
+                <th className="py-1">Product</th>
+                <th className="py-1">Base price</th>
+                {group.tiers.map((tier) => (
+                  <th key={tier.minQty} className="py-1">{tier.minQty}+</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {productPreviews.map(({ productId, info }) => (
+                <tr key={productId} className="border-b">
+                  {info ? (
+                    <>
+                      <td className="py-1">{info.title}</td>
+                      <td className="py-1">£{info.basePrice.toFixed(2)}</td>
+                      {group.tiers.map((tier) => (
+                        <td key={tier.minQty} className="py-1">
+                          £{resultingPrice(info.basePrice, tier.percentOff).toFixed(2)}
+                        </td>
+                      ))}
+                    </>
+                  ) : (
+                    <td colSpan={2 + group.tiers.length} className="py-1 text-red-600">
+                      {productId} — product not found, will be skipped
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <section className="mb-8">
@@ -2674,7 +2768,7 @@ Edit `package.json`: change `"version": "0.1.0"` to `"version": "0.2.0"`.
 
 ```bash
 git add src/actions/groupActions.ts src/app/groups/[groupId]/page.tsx package.json
-git commit -m "Add group editor: product assignment, slot meter, go-live reconciliation (v0.2.0)"
+git commit -m "Add group editor: product assignment, slot meter, go-live reconciliation, real per-product prices (v0.2.0)"
 ```
 
 ---
@@ -2686,31 +2780,32 @@ git commit -m "Add group editor: product assignment, slot meter, go-live reconci
 - §2.1 (Partners dev app, not Develop-apps) → Task 2 implements Partners OAuth exactly.
 - §2.2 (native discounts, no Functions) → Task 8's `createDiscount` uses `discountAutomaticBasicCreate`; no Function code anywhere.
 - §2.3 (per-product threshold semantics) → Task 7's `desiredDiscountsForGroup` creates one discount per product per tier, never a multi-product discount.
-- §2.4 (loose units only, no bundles) → nothing in Tasks 1–11 creates a variant or bundle; out of scope per spec §10, correctly absent.
-- §2.5 (app-generated feed) → explicitly out of scope for this plan (Phase 3), covered by Part A (Phase 0 spike) only.
+- §2.4 (loose units only, no bundles) → nothing in Tasks 1–12 creates a variant or bundle; out of scope per spec §10, correctly absent.
+- §2.5 (Google Shopping via Shopify's native channel) → correctly requires zero code in this plan. Nothing here builds a feed, a multipack row, or a `?qty=` link, matching the spec's description that the native Google & YouTube channel handles this entirely outside the app.
 - §2.6 (metafields, no database) → Task 5 (`metafields.ts`) and Task 2's callback (logs token instead of writing to a DB).
-- §3 (architecture diagram) → Tasks 4/5 (metafield layer), 6/7/8 (engine), 9–11 (admin UI) collectively implement the left two-thirds of the diagram. The theme extension and feed endpoint (right side) are correctly Phase 2/3, out of this plan's scope.
-- §4 (data model: `shop.sparkly_tiers.config`, `product.sparkly_tiers.tiers`, percent-off units) → Task 5 implements both metafields with the exact namespace/key; Task 6 implements the percent/fraction distinction with a dedicated test.
+- §3 (architecture diagram) → Tasks 4/5 (metafield layer), 6/7/8 (engine), 9 (product prices), 10–12 (admin UI) collectively implement the diagram, which is now feed-free per §2.5. The theme extension is correctly Phase 2, out of this plan's scope.
+- §4 (data model: `shop.sparkly_tiers.config`, `product.sparkly_tiers.tiers`, percent-off units) → Task 5 implements both metafields with the exact namespace/key; Task 6 implements the percent/fraction distinction with a dedicated test; Task 9 and Task 12 supply the real per-product `basePrice`/`unitPrice` the data model specifies, computed from each product's actual Shopify price rather than a placeholder.
 - §5.1 (reconciler: idempotent, self-healing, budget-safe) → Task 7's test suite covers idempotency (test: "produces zero actions when actual state already matches"), self-healing (implicit: `listActualDiscounts` reads real Shopify state every time, so hand-edits are detected as diffs), and all-or-nothing budget refusal (2 dedicated tests).
 - §5.1 discount shape (`combinesWith: productDiscounts: false`) → hard-coded in Task 8's `createDiscount`.
-- §5.2 (admin UI: groups list, group editor, slot meter, settings) → Tasks 9, 10, 11 cover groups list, create, edit/assign/go-live, and the slot meter. **Gap found: the spec's "Settings — copy templates and CSS" (§5.2, §3 `shop.sparkly_tiers.settings`) has no task.** This is intentionally deferred: settings only matter to the Phase 2 storefront widget's rendering, and building a settings UI with no consumer yet would be speculative. Noting this explicitly rather than silently dropping it — Phase 2's plan must add the settings metafield and its editor page before the widget can read it.
+- §5.2 (admin UI: groups list, group editor, slot meter, settings) → Tasks 10, 11, 12 cover groups list, create, edit/assign/go-live, and the slot meter. **Gap found: the spec's "Settings — copy templates and CSS" (§5.2, §3 `shop.sparkly_tiers.settings`) has no task.** This is intentionally deferred: settings only matter to the Phase 2 storefront widget's rendering, and building a settings UI with no consumer yet would be speculative. Noting this explicitly rather than silently dropping it — Phase 2's plan must add the settings metafield and its editor page before the widget can read it.
 - §5.3 (theme app extension / widget) → out of scope, Phase 2, correctly absent.
-- §5.4 (feed endpoint) → out of scope, Phase 3, correctly absent.
+- §5.4 (Google Shopping, no app component) → correctly absent from this plan.
 - §6 (auth) → Tasks 2–3 implement this exactly, copied from the proven `sparkly-tails-pickup-app` implementation.
-- §7 (phasing) → this plan explicitly covers only Phase 0 (Part A) and Phase 1 (Part B), per the spec's own "Planning scope" note added during self-review.
-- §8 (testing: pure units carry correctness) → `tier-math`, `reconciler` are 100% pure and fully unit-tested (Tasks 6, 7); `feed` is out of scope (Phase 3).
-- §9 (risks) → feed price-match risk is Part A's entire purpose; 25-slot cap is Task 7/11's slot meter and all-or-nothing refusal; rounding is Task 6's `resultingPrice` plus its visible display in Task 11's group page; token-in-env trade-off is Task 2 Step 7's explicit design.
-- §10 (out of scope) → confirmed nothing in this plan builds bundles, buyable packs, Functions, multi-shop storage, or mix-and-match groups.
+- §7 (phasing) → this plan covers Phase 1 only, per the spec's "Planning scope" note. Google Shopping (§2.5) needs no phase of its own.
+- §8 (testing: pure units carry correctness) → `tier-math` and `reconciler` are 100% pure and fully unit-tested (Tasks 6, 7).
+- §9 (risks) → the feed price-mismatch risk no longer applies (no custom feed exists to mismatch, §2.5); 25-slot cap is Task 7/12's slot meter and all-or-nothing refusal; rounding is Task 6's `resultingPrice`, now shown against each product's real price in Task 12's per-product table rather than an example; token-in-env trade-off is Task 2 Step 7's explicit design.
+- §10 (out of scope) → confirmed nothing in this plan builds bundles, buyable packs, Functions, multi-shop storage, mix-and-match groups, or a custom Google feed.
 
-**2. Placeholder scan.** One placeholder found and kept deliberately visible rather than removed: Task 11 Step 1's `unitPrice: '0.00'` in `syncProductTiers`. This is flagged inline with a note explaining why (Phase 1 has no base-price lookup in scope) and what must happen before Phase 2 can proceed — this is a documented scope boundary, not a "TBD" left for the implementer to guess at. No other TBD/TODO/"add proper handling" patterns found.
+**2. Placeholder scan.** An earlier revision of this plan left one placeholder — `unitPrice: '0.00'` in Task 12's (then Task 11's) `syncProductTiers` call — flagged inline rather than hidden, with a note explaining why. This revision resolves it: Task 9 adds real product price lookup (`getProductInfo`), and Task 12 now computes `basePrice`/`unitPrice` from each product's actual Shopify price via `resultingPrice`, shown live in the group editor's per-product table. No placeholders remain in this plan. No other TBD/TODO/"add proper handling" patterns found.
 
 **3. Type consistency.** Traced every shared type/function across task boundaries:
-- `Config`, `TierGroup`, `Tier` — defined once in Task 5, imported (never redeclared) by Tasks 7, 10, 11.
-- `ActualDiscount`, `Action`, `ReconcileResult` — defined once in Task 7, imported by Task 8 and Task 11.
-- `percentOffFromTargetPrice`, `resultingPrice`, `percentageToShopifyFraction` — defined once in Task 6; `resultingPrice` used in Task 11's page, `percentageToShopifyFraction` used in Task 8's `createDiscount`/`listActualDiscounts`. Names match exactly at every call site.
-- `shopifyQuery<T>` — defined once in Task 4, imported by Tasks 5 and 8 with no signature drift.
-- `redirectWithToken`, `appendToken`, `setAuthToken`/`getAuthToken` — defined once in Task 3, imported by Task 10/11's Server Actions and Task 9's page.
-- `syncProductTiers(productId, productTiers)` — defined in Task 5 with a nullable second parameter; called in Task 11 with either a real object or `null`, matching the signature.
+- `Config`, `TierGroup`, `Tier` — defined once in Task 5, imported (never redeclared) by Tasks 7, 11, 12.
+- `ActualDiscount`, `Action`, `ReconcileResult` — defined once in Task 7, imported by Task 8 and Task 12.
+- `percentOffFromTargetPrice`, `resultingPrice`, `percentageToShopifyFraction` — defined once in Task 6; `resultingPrice` used in Task 12's page and `setGroupStatus`, `percentageToShopifyFraction` used in Task 8's `createDiscount`/`listActualDiscounts`. Names match exactly at every call site.
+- `ProductInfo` / `getProductInfo(productId)` — defined once in Task 9, imported by Task 12's `setGroupStatus` and its group editor page with no signature drift.
+- `shopifyQuery<T>` — defined once in Task 4, imported by Tasks 5, 8, and 9 with no signature drift.
+- `redirectWithToken`, `appendToken`, `setAuthToken`/`getAuthToken` — defined once in Task 3, imported by Task 11/12's Server Actions and Task 10's page.
+- `syncProductTiers(productId, productTiers)` — defined in Task 5 with a nullable second parameter and a `DenormalisedProductTier` shape that now includes `basePrice`; called in Task 12 with either a real computed object (from Task 9's price + Task 6's math) or `null`, matching the signature exactly.
 
 No drift found between definition and call sites.
 
