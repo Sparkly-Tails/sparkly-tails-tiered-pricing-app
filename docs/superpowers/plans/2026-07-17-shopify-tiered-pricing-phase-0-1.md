@@ -23,7 +23,7 @@ These apply to every task below; re-stated here so no single task can be reviewe
 - **The reconciler is all-or-nothing.** If applying a change would push the store over the 25-discount budget, it must refuse the entire change — never partially apply it.
 - **The reconciler is idempotent.** Running it twice with the same desired config produces zero additional actions the second time.
 - **`combinesWith` on every tier discount:** `{ productDiscounts: false, orderDiscounts: true, shippingDiscounts: true }`.
-- **`APP_VERSION` is bumped in every commit that changes code** — patch for fixes, minor for features — in the same commit as the change, displayed in the app UI so a deploy is visually confirmable.
+- **`APP_VERSION` is bumped in every commit that changes code** — patch for fixes/infrastructure, minor for user-facing features — in the same commit as the change. Displayed as a small `v{version}` badge in the root layout (`src/app/layout.tsx`, added in Task 3), visible on every page, so a deploy is visually confirmable. Read the current value from `package.json` and increment it — never hardcode a target version, since each task builds on whatever the previous task actually committed.
 - **Store facts:** Shopify **Basic** plan, **GBP**, Europe/London. Shopify Functions are unavailable to this app (Plus-only for private/custom apps) — do not reach for one.
 - Node 20.20.2 is the target runtime (confirmed installed).
 
@@ -711,10 +711,14 @@ npm run build
 
 Expected: `Compiled successfully`.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 10: Bump APP_VERSION**
+
+Per the Global Constraints, every commit that changes code bumps the version. This task adds infrastructure, not a user-facing feature, so bump the **patch** number: read the current `"version"` in `package.json` and increment its third segment by 1 (e.g. `0.1.0` → `0.1.1`).
+
+- [ ] **Step 11: Commit**
 
 ```bash
-git add src/lib/shopify-auth.ts src/proxy.ts src/app/api/auth src/app/api/debug tests/lib/shopify-auth.test.ts
+git add src/lib/shopify-auth.ts src/proxy.ts src/app/api/auth src/app/api/debug tests/lib/shopify-auth.test.ts package.json
 git commit -m "Add Shopify OAuth auth core: HMAC verify, stateless token, proxy guard"
 ```
 
@@ -732,7 +736,7 @@ git commit -m "Add Shopify OAuth auth core: HMAC verify, stateless token, proxy 
 
 **Interfaces:**
 - Consumes: `makeSessionToken` from `@/lib/shopify-auth` (Task 2)
-- Produces: `appendToken(href: string, token: string): string`, `setAuthToken(token: string): void`, `getAuthToken(): string` — used by every page/component that renders a link (Tasks 9, 10, 11) and by `redirectWithToken(path: string): Promise<never>` for Server Action redirects.
+- Produces: `appendToken(href: string, token: string): string`, `setAuthToken(token: string): void`, `getAuthToken(): string` — used by every page/component that renders a link (Tasks 10, 11, 12) and by `redirectWithToken(path: string): Promise<never>` for Server Action redirects. Also adds a small `v{package.json version}` badge to the root layout, visible on every page from this task onward — the app-wide version display the Global Constraints require.
 
 - [ ] **Step 1: Create auth-token.ts**
 
@@ -869,6 +873,7 @@ export async function redirectWithToken(path: string): Promise<never> {
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import AuthTokenInit from "@/components/AuthTokenInit";
+import packageJson from "../../package.json";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -885,12 +890,17 @@ export default async function RootLayout({
     <html lang="en">
       <body>
         <AuthTokenInit initialToken={authToken} />
+        <div className="text-xs text-gray-400 text-right px-4 pt-1">
+          v{packageJson.version}
+        </div>
         {children}
       </body>
     </html>
   );
 }
 ```
+
+The version badge reads `package.json` directly (not a hardcoded string), so it automatically shows whatever value each later task's version bump commits — this is the app-wide "displayed in the app UI" requirement from the Global Constraints, satisfied once here rather than repeated per page.
 
 - [ ] **Step 7: Verify build**
 
@@ -908,11 +918,15 @@ npm run lint
 
 Expected: no errors (nothing yet imports `next/link` outside `AuthLink.tsx`).
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 9: Bump APP_VERSION**
+
+Infrastructure task — bump the **patch** number: read the current `"version"` in `package.json` and increment its third segment by 1.
+
+- [ ] **Step 10: Commit**
 
 ```bash
-git add src/lib/auth-token.ts src/lib/auth-redirect.ts src/lib/useAuthRouter.ts src/components/AuthTokenInit.tsx src/components/AuthLink.tsx src/app/layout.tsx
-git commit -m "Add stateless token plumbing, AuthLink, and root layout"
+git add src/lib/auth-token.ts src/lib/auth-redirect.ts src/lib/useAuthRouter.ts src/components/AuthTokenInit.tsx src/components/AuthLink.tsx src/app/layout.tsx package.json
+git commit -m "Add stateless token plumbing, AuthLink, root layout, and version badge"
 ```
 
 ---
@@ -1038,10 +1052,14 @@ npm test -- tests/lib/shopify-client.test.ts
 
 Expected: PASS, 2 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Bump APP_VERSION**
+
+Infrastructure task — bump the **patch** number: read the current `"version"` in `package.json` and increment its third segment by 1.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/lib/shopify-client.ts tests/lib/shopify-client.test.ts
+git add src/lib/shopify-client.ts tests/lib/shopify-client.test.ts package.json
 git commit -m "Add Shopify Admin GraphQL client"
 ```
 
@@ -1290,10 +1308,14 @@ npm test -- tests/lib/metafields.test.ts
 
 Expected: PASS, 4 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Bump APP_VERSION**
+
+Infrastructure task — bump the **patch** number: read the current `"version"` in `package.json` and increment its third segment by 1.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/lib/metafields.ts tests/lib/metafields.test.ts
+git add src/lib/metafields.ts tests/lib/metafields.test.ts package.json
 git commit -m "Add metafield read/write layer for tier config"
 ```
 
@@ -1426,10 +1448,14 @@ npm test -- tests/lib/tier-math.test.ts
 
 Expected: PASS, 7 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Bump APP_VERSION**
+
+Infrastructure task — bump the **patch** number: read the current `"version"` in `package.json` and increment its third segment by 1.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/lib/tier-math.ts tests/lib/tier-math.test.ts
+git add src/lib/tier-math.ts tests/lib/tier-math.test.ts package.json
 git commit -m "Add pure tier-math library with percent/fraction conversion"
 ```
 
@@ -1779,10 +1805,14 @@ npm test -- tests/lib/reconciler.test.ts
 
 Expected: PASS, 9 tests.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Bump APP_VERSION**
+
+Infrastructure task — bump the **patch** number: read the current `"version"` in `package.json` and increment its third segment by 1.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/lib/reconciler.ts tests/fixtures/groups.ts tests/lib/reconciler.test.ts
+git add src/lib/reconciler.ts tests/fixtures/groups.ts tests/lib/reconciler.test.ts package.json
 git commit -m "Add pure reconciler: diff desired config against actual discounts"
 ```
 
@@ -2111,10 +2141,14 @@ npm test
 
 Expected: all tests across all files pass (shopify-auth, shopify-client, metafields, tier-math, reconciler, shopify-discounts).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Bump APP_VERSION**
+
+Infrastructure task — bump the **patch** number: read the current `"version"` in `package.json` and increment its third segment by 1.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/lib/shopify-discounts.ts tests/lib/shopify-discounts.test.ts
+git add src/lib/shopify-discounts.ts tests/lib/shopify-discounts.test.ts package.json
 git commit -m "Add Shopify discount execution layer"
 ```
 
@@ -2237,10 +2271,14 @@ npm test -- tests/lib/products.test.ts
 
 Expected: PASS, 3 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Bump APP_VERSION**
+
+Infrastructure task — bump the **patch** number: read the current `"version"` in `package.json` and increment its third segment by 1.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/lib/products.ts tests/lib/products.test.ts
+git add src/lib/products.ts tests/lib/products.test.ts package.json
 git commit -m "Add product price lookup for real per-product tier pricing"
 ```
 
@@ -2319,10 +2357,14 @@ npm run build
 
 Expected: `Compiled successfully`. Note: this will attempt to call `getConfig()` at build time only if the route is statically analysed — since it reads `headers()`, Next.js will correctly mark it as dynamic and defer execution to request time, so a missing `SHOPIFY_ACCESS_TOKEN` at build time is not an error here.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Bump APP_VERSION**
+
+This is the first user-facing feature (the admin app's home page) — bump the **minor** number: read the current `"version"` in `package.json`, increment its second segment by 1, and reset the third segment to `0` (e.g. `0.1.8` → `0.2.0`).
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/app/page.tsx
+git add src/app/page.tsx package.json
 git commit -m "Add tier groups list page"
 ```
 
@@ -2460,10 +2502,14 @@ npm run build
 
 Expected: `Compiled successfully`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 4: Bump APP_VERSION**
+
+User-facing feature — bump the **minor** number: read the current `"version"` in `package.json`, increment its second segment by 1, and reset the third segment to `0`.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/actions/groupActions.ts src/app/groups/new/page.tsx
+git add src/actions/groupActions.ts src/app/groups/new/page.tsx package.json
 git commit -m "Add create-group Server Action and form"
 ```
 
@@ -2762,13 +2808,11 @@ Expected: all tests pass.
 
 - [ ] **Step 5: Bump APP_VERSION and commit**
 
-Per the global constraint, every commit that changes code bumps the version. This is the last task of Phase 1, shipping the full feature — a minor bump.
-
-Edit `package.json`: change `"version": "0.1.0"` to `"version": "0.2.0"`.
+This is the last task of Phase 1, shipping the feature that makes the app actually work end-to-end (go-live reconciliation) — bump the **minor** number: read the current `"version"` in `package.json`, increment its second segment by 1, and reset the third segment to `0`.
 
 ```bash
 git add src/actions/groupActions.ts src/app/groups/[groupId]/page.tsx package.json
-git commit -m "Add group editor: product assignment, slot meter, go-live reconciliation, real per-product prices (v0.2.0)"
+git commit -m "Add group editor: product assignment, slot meter, go-live reconciliation, real per-product prices"
 ```
 
 ---
