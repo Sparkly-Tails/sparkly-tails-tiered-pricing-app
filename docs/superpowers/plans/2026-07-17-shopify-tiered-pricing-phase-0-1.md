@@ -1,0 +1,2725 @@
+# Shopify Tiered Pricing App — Phase 0 + Phase 1 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Validate the Google Merchant Center feed approach (Phase 0), then build the tiered-pricing discount engine — a Next.js admin app that lets Sparkly Tails define per-product volume-price tiers and reconciles them into real Shopify automatic discounts (Phase 1).
+
+**Architecture:** A Next.js 16 App Router app, embedded in the Shopify admin via the proven stateless `?stt=` auth pattern (Partners development app, OAuth, no database — the access token lives in an env var). Business data lives entirely in a shop metafield. Three pure, Shopify-free libraries (`tier-math`, `reconciler`, plus the pure parts of the Shopify client) carry all pricing correctness and are TDD'd in isolation; a thin `shopify-discounts` layer executes the reconciler's decisions as GraphQL mutations. The admin UI is server-rendered pages reading/writing the metafield through Server Actions.
+
+**Tech Stack:** Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS 4, Vitest (unit tests — chosen over Jest because the codebase is pure ESM/TypeScript with no need for Jest's CommonJS-era config), Shopify Admin GraphQL API 2025-10, Vercel.
+
+## Global Constraints
+
+These apply to every task below; re-stated here so no single task can be reviewed in isolation from them.
+
+- **No database.** All business data lives in Shopify metafields. The Shopify access token lives in the `SHOPIFY_ACCESS_TOKEN` env var (set manually after OAuth — see Task 8), not MongoDB.
+- **Auth pattern is exact, not "similar to."** Stateless `?stt=` URL/header token, 10-minute TTL, no cookies, no App Bridge. `src/proxy.ts` (not `middleware.ts` — Next.js 16 renamed the export). Every internal link uses `AuthLink`, enforced by an ESLint `no-restricted-imports` rule. This is copied near-verbatim from the working `sparkly-tails-pickup-app` repo, which has already ruled out cookies and App Bridge on real hardware — do not re-litigate that decision.
+- **`auth/start` has exactly one job:** verify HMAC, redirect to OAuth. No session/skip-OAuth logic belongs there — that lives in `proxy.ts`.
+- **`auth/callback` redirects to `https://${shop}/admin`**, never back to the app's own URL.
+- **Build the OAuth callback URL from `req.url`**, never from an env var (avoids trailing-slash mismatches).
+- **Scopes:** `write_discounts,read_discounts,write_products,read_products` — set in `auth/start`, not the Partners dashboard.
+- **`percentOff` in config is a PERCENTAGE** (e.g. `14.7` meaning 14.7%). Shopify's `customerGets.value.percentage` field is a **FRACTION** (e.g. `0.147`). The conversion (`percentOff / 100`) lives in exactly one place — `tier-math` — and has a dedicated test. Getting this wrong is a 10× pricing bug in a live discount.
+- **Discounts are scoped per-product.** One discount per tier per product — never one discount targeting multiple products. Slot cost is `tiers × products`, budget is 25 active automatic discounts store-wide.
+- **The reconciler is all-or-nothing.** If applying a change would push the store over the 25-discount budget, it must refuse the entire change — never partially apply it.
+- **The reconciler is idempotent.** Running it twice with the same desired config produces zero additional actions the second time.
+- **`combinesWith` on every tier discount:** `{ productDiscounts: false, orderDiscounts: true, shippingDiscounts: true }`.
+- **`APP_VERSION` is bumped in every commit that changes code** — patch for fixes, minor for features — in the same commit as the change, displayed in the app UI so a deploy is visually confirmable.
+- **Store facts:** Shopify **Basic** plan, **GBP**, Europe/London. Shopify Functions are unavailable to this app (Plus-only for private/custom apps) — do not reach for one.
+- Node 20.20.2 is the target runtime (confirmed installed).
+
+---
+
+## Part A: Phase 0 — Merchant Center Feed Spike
+
+This is a human-in-the-loop investigation, not a coding task. It exists because the spec (§9) flags a real, currently-unknown risk: Google Merchant Center may disapprove a feed row whose price (£7.25 for 5 units) doesn't match the price your theme's product-page JSON-LD reports (£1.70 per unit). This is cheap to test and expensive to discover after Phase 3 is built, so it runs first and gates Phase 3 planning — not Phase 1, which proceeds regardless of the outcome.
+
+### Task 0: Manually submit one feed row to Google Merchant Center and record the result
+
+**Files:**
+- Create: `docs/superpowers/plans/phase-0-spike-result.md`
+
+**Interfaces:**
+- Consumes: nothing (no code dependency)
+- Produces: a written, dated verdict (`approved` / `disapproved` / `pending`) that Phase 3 planning will read before it starts. Phase 1 does not depend on this result and proceeds in parallel or beforehand.
+
+- [ ] **Step 1: Confirm Merchant Center access**
+
+You need an existing Google Merchant Center account linked to `sparklytails.com`, with at least one product already synced (via the existing Shopify Google & YouTube channel or a manual feed), so you have a baseline of what an *approved* listing looks like for comparison.
+
+If there's no Merchant Center account yet, create one at [merchants.google.com](https://merchants.google.com) and complete website-claiming for `sparklytails.com` before continuing — this step has no code shortcut.
+
+- [ ] **Step 2: Pick one real product and record its current landing-page price**
+
+Choose a product that will eventually get tiered pricing (e.g. an existing voucher/subscription product). Open its live product page and record:
+
+- The displayed price (e.g. `£1.70`)
+- The price shown in its JSON-LD structured data. Find this by viewing page source and searching for `application/ld+json`, or running in the browser console on the product page:
+
+```js
+[...document.querySelectorAll('script[type="application/ld+json"]')]
+  .map(s => JSON.parse(s.textContent))
+```
+
+Look for an `offers.price` field. Write both numbers down in `docs/superpowers/plans/phase-0-spike-result.md`.
+
+- [ ] **Step 3: Hand-build one supplemental feed row for a 5-unit tier**
+
+In Merchant Center, go to **Products → Feeds** and create a new **supplemental feed** (a small manually-uploaded feed that layers on top of your primary feed) named `tier-pricing-spike`. Use a plain-text/TSV feed with one data row plus header, matching [Google's product data specification](https://support.google.com/merchants/answer/7052112):
+
+```
+id	title	link	price	availability	condition	brand
+sparklytails-voucher-qty5	<Product name> — 5 pack	https://sparklytails.com/products/<handle>?qty=5	7.25 GBP	in stock	new	Sparkly Tails
+```
+
+Replace `<Product name>` and `<handle>` with the real product you picked in Step 2. `7.25 GBP` should be 5 × the intended tier price (e.g. 5 × £1.45).
+
+Upload this as a one-off manual fetch (Merchant Center supports "Upload now" for a manually-hosted file, or paste-based upload for supplemental feeds — use whichever your Merchant Center UI offers without requiring code).
+
+- [ ] **Step 4: Wait for processing and read the diagnostics**
+
+Merchant Center typically processes new feed items within a few hours. Check back and go to **Products → Diagnostics**, filtering to the `tier-pricing-spike` feed. Look specifically for:
+
+- `Price mismatch` or `Landing page price mismatch` issues
+- Any `Disapproved` status on the item
+- The exact wording of any warning, even if the item is only "under review" rather than fully disapproved
+
+- [ ] **Step 5: Record the verdict**
+
+Write the result to `docs/superpowers/plans/phase-0-spike-result.md`:
+
+```markdown
+# Phase 0 Spike Result
+
+**Date tested:** <date>
+**Product used:** <product name/handle>
+**Landing page price (visible + JSON-LD):** £X.XX
+**Feed row submitted:** id=sparklytails-voucher-qty5, price=£7.25, link=?qty=5
+
+## Verdict
+
+<APPROVED | DISAPPROVED | STILL PENDING AFTER 48H>
+
+## Diagnostic detail
+
+<paste the exact Merchant Center diagnostic message, or "none — approved cleanly">
+
+## Implication for Phase 3
+
+<If APPROVED: proceed with the app-generated feed as designed in the spec §5.4.>
+<If DISAPPROVED: Phase 3 must use Google Merchant Promotions
+ (https://support.google.com/merchants/answer/2906014) instead of multipack
+ feed rows — a promotion badge on the normal-priced listing rather than a
+ separate discounted offer, which cannot trigger a price-mismatch check.>
+```
+
+- [ ] **Step 6: Commit the result**
+
+```bash
+git add docs/superpowers/plans/phase-0-spike-result.md
+git commit -m "Record Phase 0 Merchant Center feed spike result"
+```
+
+---
+
+## Part B: Phase 1 — Discount Engine
+
+### File Structure
+
+```
+sparkly-tails-tiered-pricing-app/
+  package.json
+  tsconfig.json
+  next.config.ts
+  eslint.config.mjs
+  vitest.config.ts
+  .env.local.example
+  src/
+    proxy.ts                          # Task 2 — auth guard
+    lib/
+      shopify-auth.ts                 # Task 2 — HMAC + token verify (copied from pickup app)
+      auth-token.ts                   # Task 3 — client-side token state
+      auth-redirect.ts                # Task 3 — Server Action redirect helper
+      useAuthRouter.ts                # Task 3 — router wrapper
+      shopify-client.ts               # Task 4 — raw GraphQL fetch wrapper
+      metafields.ts                   # Task 5 — read/write shop + product metafields
+      tier-math.ts                    # Task 6 — pure pricing math
+      reconciler.ts                   # Task 7 — pure diff → actions
+      shopify-discounts.ts            # Task 8 — actions → GraphQL mutations
+    components/
+      AuthTokenInit.tsx                # Task 3
+      AuthLink.tsx                     # Task 3
+    app/
+      layout.tsx                       # Task 3 — mounts AuthTokenInit
+      page.tsx                         # Task 9 — groups list (home)
+      globals.css                      # Task 1
+      groups/
+        new/page.tsx                   # Task 10 — create group form
+        [groupId]/page.tsx              # Task 11 — edit group, assign products, slot meter
+      api/
+        auth/
+          start/route.ts               # Task 2
+          callback/route.ts            # Task 2
+        debug/route.ts                 # Task 2 — dev-only state inspector
+    actions/
+      groupActions.ts                  # Task 10, 11 — Server Actions: create/update/delete group, assign products, go live
+  tests/
+    lib/
+      tier-math.test.ts                # Task 6
+      reconciler.test.ts               # Task 7
+    fixtures/
+      groups.ts                        # Task 7 — shared test fixtures
+```
+
+---
+
+### Task 1: Project scaffold
+
+**Files:**
+- Create: `package.json`
+- Create: `tsconfig.json`
+- Create: `next.config.ts`
+- Create: `eslint.config.mjs`
+- Create: `vitest.config.ts`
+- Create: `.env.local.example`
+- Create: `src/app/layout.tsx` (minimal placeholder — replaced in Task 3)
+- Create: `src/app/page.tsx` (minimal placeholder — replaced in Task 9)
+- Create: `src/app/globals.css`
+- Create: `.gitignore` (already exists — extend it)
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: a runnable Next.js app skeleton (`npm run dev` serves a blank page) that every later task builds inside. `APP_VERSION` constant available via `package.json`'s `version` field.
+
+- [ ] **Step 1: Initialize the package.json**
+
+```json
+{
+  "name": "sparkly-tails-tiered-pricing-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "next": "16.2.10",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20.19.43",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.10",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vitest": "^3"
+  }
+}
+```
+
+- [ ] **Step 2: Install dependencies**
+
+```bash
+cd ~/Documents/sparkly-tails-tiered-pricing-app
+npm install
+```
+
+Expected: `node_modules/` created, `package-lock.json` created, no errors.
+
+- [ ] **Step 3: Create tsconfig.json**
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [{ "name": "next" }],
+    "paths": { "@/*": ["./src/*"] }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+```
+
+- [ ] **Step 4: Create next.config.ts with the embedding CSP**
+
+```typescript
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  async headers() {
+    return [
+      {
+        source: '/(.*)',
+        headers: [
+          {
+            key: 'Content-Security-Policy',
+            // Allow Shopify admin to embed this app in an iframe
+            value:
+              'frame-ancestors https://admin.shopify.com https://*.myshopify.com;',
+          },
+        ],
+      },
+    ]
+  },
+};
+
+export default nextConfig;
+```
+
+- [ ] **Step 5: Create eslint.config.mjs (auth-link rule added now, enforced from Task 3 onward)**
+
+```javascript
+import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
+
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
+  globalIgnores([
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+  ]),
+  // Every internal link must carry the auth token (see src/proxy.ts) or it
+  // silently 403s. AuthLink.tsx is the only place allowed to import next/link.
+  {
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: ["src/components/AuthLink.tsx"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "next/link",
+              message: "Use AuthLink (src/components/AuthLink.tsx) instead — a bare next/link silently drops the auth token.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+]);
+
+export default eslintConfig;
+```
+
+- [ ] **Step 6: Create vitest.config.ts**
+
+```typescript
+import { defineConfig } from 'vitest/config'
+import path from 'path'
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+    include: ['tests/**/*.test.ts'],
+  },
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+})
+```
+
+- [ ] **Step 7: Create .env.local.example**
+
+```bash
+# Shopify Partners app credentials (Partners dashboard → your app → API credentials)
+SHOPIFY_API_SECRET_KEY=
+NEXT_PUBLIC_SHOPIFY_API_KEY=
+
+# Store this app talks to
+SHOPIFY_SHOP=sparklytails.myshopify.com
+
+# Set manually after completing OAuth once (see Task 8 / auth/callback logs) —
+# there is no database, so this is the only place the access token lives.
+SHOPIFY_ACCESS_TOKEN=
+```
+
+- [ ] **Step 8: Extend .gitignore**
+
+Read the current `.gitignore`, then add Next.js/Vitest-specific entries:
+
+```
+node_modules/
+.next/
+.env*.local
+.vercel
+coverage/
+```
+
+- [ ] **Step 9: Create a minimal placeholder layout and page**
+
+`src/app/layout.tsx`:
+```tsx
+import type { Metadata } from "next";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Sparkly Tails — Tiered Pricing",
+  description: "Volume pricing admin",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+```
+
+`src/app/page.tsx`:
+```tsx
+export default function Home() {
+  return <p>Sparkly Tails Tiered Pricing — scaffold OK</p>;
+}
+```
+
+`src/app/globals.css`:
+```css
+@import "tailwindcss";
+```
+
+- [ ] **Step 10: Verify the app builds and runs**
+
+```bash
+npm run build
+```
+
+Expected: `Compiled successfully`, no type errors.
+
+```bash
+npm run dev &
+sleep 3
+curl -s http://localhost:3000 | grep "scaffold OK"
+kill %1
+```
+
+Expected: the grep finds the placeholder text.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add package.json package-lock.json tsconfig.json next.config.ts eslint.config.mjs vitest.config.ts .env.local.example .gitignore src/
+git commit -m "Scaffold Next.js 16 app with Tailwind, ESLint, and Vitest"
+```
+
+---
+
+### Task 2: Auth core — HMAC verify, stateless token, proxy, OAuth routes
+
+This is copied near-verbatim from the working `sparkly-tails-pickup-app` repo (`~/Documents/sparkly-tails-pickup-app`), which has already proven this pattern in production, including ruling out cookies and App Bridge on real Shopify iPad hardware. Do not redesign it — the one deliberate difference is `auth/callback`, which has nowhere to persist the token (no database) and must log it for one-time manual capture into Vercel env instead.
+
+**Files:**
+- Create: `src/lib/shopify-auth.ts`
+- Create: `src/proxy.ts`
+- Create: `src/app/api/auth/start/route.ts`
+- Create: `src/app/api/auth/callback/route.ts`
+- Create: `src/app/api/debug/route.ts`
+- Test: `tests/lib/shopify-auth.test.ts`
+
+**Interfaces:**
+- Consumes: nothing
+- Produces: `verifyShopifyHmac(params: URLSearchParams, secret: string): Promise<boolean>`, `makeSessionToken(shop: string, secret: string): Promise<string>`, `verifyUrlToken(token: string, secret: string): Promise<boolean>` — used by `proxy.ts` and both auth routes, and by Task 3's `auth-redirect.ts`.
+
+- [ ] **Step 1: Write the failing test for HMAC verify and token round-trip**
+
+```typescript
+// tests/lib/shopify-auth.test.ts
+import { describe, it, expect } from 'vitest'
+import { verifyShopifyHmac, makeSessionToken, verifyUrlToken } from '@/lib/shopify-auth'
+
+describe('verifyShopifyHmac', () => {
+  it('rejects a request with no hmac param', async () => {
+    const params = new URLSearchParams({ shop: 'test.myshopify.com' })
+    expect(await verifyShopifyHmac(params, 'secret')).toBe(false)
+  })
+
+  it('rejects an invalid hmac', async () => {
+    const params = new URLSearchParams({ shop: 'test.myshopify.com', hmac: 'wrong' })
+    expect(await verifyShopifyHmac(params, 'secret')).toBe(false)
+  })
+})
+
+describe('makeSessionToken / verifyUrlToken', () => {
+  it('accepts a freshly minted token', async () => {
+    const token = await makeSessionToken('test.myshopify.com', 'secret')
+    expect(await verifyUrlToken(token, 'secret')).toBe(true)
+  })
+
+  it('rejects a token signed with the wrong secret', async () => {
+    const token = await makeSessionToken('test.myshopify.com', 'secret-a')
+    expect(await verifyUrlToken(token, 'secret-b')).toBe(false)
+  })
+
+  it('rejects a malformed token', async () => {
+    expect(await verifyUrlToken('not-a-real-token', 'secret')).toBe(false)
+  })
+
+  it('rejects a token older than the 10-minute window', async () => {
+    // Construct an expired token directly: shop|timestamp-11-minutes-ago|validSig
+    const elevenMinutesAgo = Date.now() - 11 * 60 * 1000
+    const shop = 'test.myshopify.com'
+    const enc = new TextEncoder()
+    const key = await crypto.subtle.importKey(
+      'raw', enc.encode('secret'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+    )
+    const sig = await crypto.subtle.sign('HMAC', key, enc.encode(`${shop}|${elevenMinutesAgo}`))
+    const sigHex = [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('')
+    const expiredToken = `${shop}|${elevenMinutesAgo}|${sigHex}`
+    expect(await verifyUrlToken(expiredToken, 'secret')).toBe(false)
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+npm test -- tests/lib/shopify-auth.test.ts
+```
+
+Expected: FAIL — `Cannot find module '@/lib/shopify-auth'`.
+
+- [ ] **Step 3: Write shopify-auth.ts**
+
+```typescript
+// src/lib/shopify-auth.ts
+// All crypto uses Web Crypto API — safe to import in Edge middleware (proxy.ts).
+
+async function hmacSha256(secret: string, message: string): Promise<string> {
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message))
+  return [...new Uint8Array(sig)]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return diff === 0
+}
+
+/** Verify Shopify's HMAC signature on the initial app-load URL. */
+export async function verifyShopifyHmac(
+  params: URLSearchParams,
+  secret: string,
+): Promise<boolean> {
+  const hmac = params.get('hmac')
+  if (!hmac) return false
+
+  const message = [...params.entries()]
+    .filter(([k]) => k !== 'hmac')
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&')
+
+  const digest = await hmacSha256(secret, message)
+  return timingSafeEqual(digest, hmac)
+}
+
+/** Create a signed session token — same format used for both the URL token and (unused here) a cookie fallback. */
+export async function makeSessionToken(
+  shop: string,
+  secret: string,
+): Promise<string> {
+  const ts = Date.now().toString()
+  const payload = `${shop}|${ts}`
+  const sig = await hmacSha256(secret, payload)
+  return `${payload}|${sig}`
+}
+
+async function verifyTokenWithMaxAge(
+  token: string,
+  secret: string,
+  maxAgeMs: number,
+): Promise<boolean> {
+  const parts = token.split('|')
+  if (parts.length !== 3) return false
+  const [shop, ts, sig] = parts
+  if (Date.now() - parseInt(ts) > maxAgeMs) return false
+  const expected = await hmacSha256(secret, `${shop}|${ts}`)
+  return timingSafeEqual(expected, sig)
+}
+
+/**
+ * Verify a stateless URL/header-carried auth token. 10-minute window since it
+ * travels in URLs and request/response headers rather than an httpOnly cookie.
+ * No cookie or App Bridge session token is used anywhere in this app — both
+ * are confirmed unreliable in the Shopify iPad app's webview (see the
+ * sparkly-tails-pickup-app repo history and the shopify-app-auth skill).
+ */
+export async function verifyUrlToken(
+  token: string,
+  secret: string,
+): Promise<boolean> {
+  return verifyTokenWithMaxAge(token, secret, 10 * 60 * 1000)
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+```bash
+npm test -- tests/lib/shopify-auth.test.ts
+```
+
+Expected: PASS, 6 tests.
+
+- [ ] **Step 5: Create proxy.ts**
+
+```typescript
+// src/proxy.ts
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
+import {
+  verifyShopifyHmac,
+  makeSessionToken,
+  verifyUrlToken,
+} from '@/lib/shopify-auth'
+
+// No cookie anywhere in this file, deliberately — see shopify-auth.ts's
+// module comment. The `stt` URL/header token is the one mechanism that
+// doesn't depend on anything surviving between requests.
+
+async function nextWithFreshToken(req: NextRequest, shop: string, secret: string): Promise<NextResponse> {
+  const freshToken = await makeSessionToken(shop, secret)
+  const requestHeaders = new Headers(req.headers)
+  requestHeaders.set('x-auth-token', freshToken)
+  const res = NextResponse.next({ request: { headers: requestHeaders } })
+  res.headers.set('x-auth-token', freshToken)
+  return res
+}
+
+export async function proxy(req: NextRequest) {
+  const { pathname, searchParams } = req.nextUrl
+
+  if (pathname.startsWith('/_next/') || pathname === '/favicon.ico') {
+    return NextResponse.next()
+  }
+
+  if (
+    pathname.startsWith('/api/auth/') ||
+    pathname.startsWith('/api/debug')
+  ) {
+    return NextResponse.next()
+  }
+
+  if (process.env.NODE_ENV === 'development') {
+    return NextResponse.next()
+  }
+
+  const secret = process.env.SHOPIFY_API_SECRET_KEY
+  const apiKey = process.env.NEXT_PUBLIC_SHOPIFY_API_KEY
+  const shop = process.env.SHOPIFY_SHOP
+
+  if (!secret || !apiKey || !shop) {
+    return new NextResponse('App misconfigured: missing env vars (503)', { status: 503 })
+  }
+
+  if (searchParams.has('hmac') && searchParams.has('shop')) {
+    const valid = await verifyShopifyHmac(searchParams, secret)
+    if (!valid) {
+      return new NextResponse('HMAC verification failed', { status: 403 })
+    }
+
+    if (searchParams.has('host')) {
+      return nextWithFreshToken(req, shop, secret)
+    }
+
+    const startUrl = new URL('/api/auth/start', req.url)
+    searchParams.forEach((v, k) => startUrl.searchParams.set(k, v))
+    return NextResponse.redirect(startUrl)
+  }
+
+  const urlToken = searchParams.get('stt')
+  if (urlToken && (await verifyUrlToken(urlToken, secret))) {
+    return nextWithFreshToken(req, shop, secret)
+  }
+
+  return new NextResponse(
+    `<!DOCTYPE html><html><head><title>Access restricted</title></head><body style="font-family:sans-serif;padding:40px;text-align:center">
+      <h2>Open this app from your Shopify admin</h2>
+      <p><a href="https://${shop}/admin/apps">Go to Shopify admin &rarr;</a></p>
+    </body></html>`,
+    { status: 403, headers: { 'Content-Type': 'text/html' } },
+  )
+}
+
+export const config = {
+  matcher: ['/((?!_next/static|_next/image|favicon\\.ico).*)'],
+}
+```
+
+- [ ] **Step 6: Create auth/start route**
+
+```typescript
+// src/app/api/auth/start/route.ts
+import { NextRequest, NextResponse } from 'next/server'
+import { verifyShopifyHmac } from '@/lib/shopify-auth'
+
+// This route has exactly one job: redirect to Shopify OAuth. No
+// session/skip-OAuth logic belongs here — that lives in proxy.ts.
+export async function GET(req: NextRequest) {
+  const { searchParams } = req.nextUrl
+  const shop = searchParams.get('shop')
+
+  if (!shop) return new NextResponse('Missing shop', { status: 400 })
+
+  const secret = process.env.SHOPIFY_API_SECRET_KEY
+  const apiKey = process.env.NEXT_PUBLIC_SHOPIFY_API_KEY
+
+  if (!secret || !apiKey) {
+    return new NextResponse('App misconfigured', { status: 503 })
+  }
+
+  const valid = await verifyShopifyHmac(searchParams, secret)
+  if (!valid) {
+    return new NextResponse('Invalid HMAC', { status: 403 })
+  }
+
+  const callbackUrl = new URL('/api/auth/callback', req.url).toString()
+  const scopes = 'write_discounts,read_discounts,write_products,read_products'
+
+  const oauthUrl = new URL(`https://${shop}/admin/oauth/authorize`)
+  oauthUrl.searchParams.set('client_id', apiKey)
+  oauthUrl.searchParams.set('scope', scopes)
+  oauthUrl.searchParams.set('redirect_uri', callbackUrl)
+
+  return NextResponse.redirect(oauthUrl.toString())
+}
+```
+
+- [ ] **Step 7: Create auth/callback route (no database — logs token for manual capture)**
+
+```typescript
+// src/app/api/auth/callback/route.ts
+import { NextRequest, NextResponse } from 'next/server'
+import { verifyShopifyHmac } from '@/lib/shopify-auth'
+
+export async function GET(req: NextRequest) {
+  const { searchParams } = req.nextUrl
+  const shop = searchParams.get('shop')
+  const code = searchParams.get('code')
+
+  if (!shop || !code) {
+    return new NextResponse('Missing shop or code', { status: 400 })
+  }
+
+  const secret = process.env.SHOPIFY_API_SECRET_KEY
+  const apiKey = process.env.NEXT_PUBLIC_SHOPIFY_API_KEY
+
+  if (!secret || !apiKey) {
+    return new NextResponse('App misconfigured', { status: 503 })
+  }
+
+  const valid = await verifyShopifyHmac(searchParams, secret)
+  if (!valid) return new NextResponse('Invalid HMAC', { status: 403 })
+
+  const tokenRes = await fetch(`https://${shop}/admin/oauth/access_token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ client_id: apiKey, client_secret: secret, code }),
+  })
+
+  if (!tokenRes.ok) {
+    const body = await tokenRes.text()
+    console.error('[auth/callback] token exchange failed:', tokenRes.status, body)
+    return new NextResponse('Token exchange failed', { status: 502 })
+  }
+
+  const { access_token } = (await tokenRes.json()) as { access_token: string }
+
+  // No database in this app — there is nowhere to persist the token
+  // automatically. Log it once so it can be copied into the
+  // SHOPIFY_ACCESS_TOKEN env var in Vercel. This only happens on install/
+  // reinstall, which is rare for a single-store private app (see spec §2.6
+  // and §9 for the accepted trade-off).
+  console.log('[auth/callback] OAuth complete for shop:', shop)
+  console.log('[auth/callback] Copy this into SHOPIFY_ACCESS_TOKEN in Vercel env vars:')
+  console.log('[auth/callback] ACCESS_TOKEN=' + access_token)
+
+  const adminUrl = `https://${shop}/admin`
+  return NextResponse.redirect(adminUrl)
+}
+```
+
+- [ ] **Step 8: Create the debug endpoint (dev-only state inspector, remove before any public/App Store distribution)**
+
+```typescript
+// src/app/api/debug/route.ts
+import { NextResponse } from 'next/server'
+
+export async function GET() {
+  return NextResponse.json({
+    secretSet: !!process.env.SHOPIFY_API_SECRET_KEY,
+    secretLength: process.env.SHOPIFY_API_SECRET_KEY?.length ?? 0,
+    apiKeySet: !!process.env.NEXT_PUBLIC_SHOPIFY_API_KEY,
+    shopSet: !!process.env.SHOPIFY_SHOP,
+    shop: process.env.SHOPIFY_SHOP ?? null,
+    accessTokenSet: !!process.env.SHOPIFY_ACCESS_TOKEN,
+  })
+}
+```
+
+- [ ] **Step 9: Verify the app still builds**
+
+```bash
+npm run build
+```
+
+Expected: `Compiled successfully`.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add src/lib/shopify-auth.ts src/proxy.ts src/app/api/auth src/app/api/debug tests/lib/shopify-auth.test.ts
+git commit -m "Add Shopify OAuth auth core: HMAC verify, stateless token, proxy guard"
+```
+
+---
+
+### Task 3: Client-side token plumbing, AuthLink, root layout
+
+**Files:**
+- Create: `src/lib/auth-token.ts`
+- Create: `src/lib/auth-redirect.ts`
+- Create: `src/lib/useAuthRouter.ts`
+- Create: `src/components/AuthTokenInit.tsx`
+- Create: `src/components/AuthLink.tsx`
+- Modify: `src/app/layout.tsx`
+
+**Interfaces:**
+- Consumes: `makeSessionToken` from `@/lib/shopify-auth` (Task 2)
+- Produces: `appendToken(href: string, token: string): string`, `setAuthToken(token: string): void`, `getAuthToken(): string` — used by every page/component that renders a link (Tasks 9, 10, 11) and by `redirectWithToken(path: string): Promise<never>` for Server Action redirects.
+
+- [ ] **Step 1: Create auth-token.ts**
+
+```typescript
+// src/lib/auth-token.ts
+// Client-side auth token state. Plain module-level variable, not React
+// state — nothing needs to re-render when it changes.
+let currentToken = ''
+
+export function setAuthToken(token: string) {
+  currentToken = token
+}
+
+export function getAuthToken(): string {
+  return currentToken
+}
+
+/** Appends `token` as the `stt` query param, preserving any existing query string. */
+export function appendToken(href: string, token: string): string {
+  if (!token) return href
+  const [path, query = ''] = href.split('?')
+  const params = new URLSearchParams(query)
+  params.set('stt', token)
+  return `${path}?${params.toString()}`
+}
+```
+
+- [ ] **Step 2: Create AuthTokenInit.tsx**
+
+```tsx
+// src/components/AuthTokenInit.tsx
+'use client'
+
+import { useEffect } from 'react'
+import { setAuthToken, getAuthToken, appendToken } from '@/lib/auth-token'
+
+type WindowWithPatchFlag = { __authFetchPatched?: boolean }
+
+export default function AuthTokenInit({ initialToken }: { initialToken: string }) {
+  useEffect(() => {
+    setAuthToken(initialToken)
+
+    const w = window as unknown as WindowWithPatchFlag
+    if (w.__authFetchPatched) return
+    w.__authFetchPatched = true
+
+    const originalFetch = window.fetch.bind(window)
+    const origin = window.location.origin
+
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : null
+
+      if (url === null) {
+        return originalFetch(input, init)
+      }
+
+      const isSameOrigin = url.startsWith('/') || url.startsWith(origin)
+      if (!isSameOrigin) {
+        return originalFetch(input, init)
+      }
+
+      const urlWithToken = appendToken(url, getAuthToken())
+      const response = await originalFetch(urlWithToken, init)
+      const freshToken = response.headers.get('x-auth-token')
+      if (freshToken) setAuthToken(freshToken)
+      return response
+    }
+  }, [initialToken])
+
+  return null
+}
+```
+
+- [ ] **Step 3: Create AuthLink.tsx**
+
+```tsx
+// src/components/AuthLink.tsx
+import Link from 'next/link'
+import type { ComponentProps } from 'react'
+import { appendToken } from '@/lib/auth-token'
+
+type AuthLinkProps = ComponentProps<typeof Link> & { token: string }
+
+export default function AuthLink({ href, token, ...rest }: AuthLinkProps) {
+  const finalHref = typeof href === 'string' ? appendToken(href, token) : href
+  return <Link href={finalHref} {...rest} />
+}
+```
+
+- [ ] **Step 4: Create useAuthRouter.ts**
+
+```typescript
+// src/lib/useAuthRouter.ts
+'use client'
+
+import { useRouter } from 'next/navigation'
+import { getAuthToken, appendToken } from '@/lib/auth-token'
+
+export function useAuthRouter() {
+  const router = useRouter()
+  return {
+    push: (href: string) => router.push(appendToken(href, getAuthToken())),
+    replace: (href: string) => router.replace(appendToken(href, getAuthToken())),
+  }
+}
+```
+
+- [ ] **Step 5: Create auth-redirect.ts**
+
+```typescript
+// src/lib/auth-redirect.ts
+import { redirect } from 'next/navigation'
+import { makeSessionToken } from '@/lib/shopify-auth'
+import { appendToken } from '@/lib/auth-token'
+
+// For redirect() calls inside Server Actions (e.g. after creating a group)
+// — the client can't intercept these, so a fresh token is minted directly.
+export async function redirectWithToken(path: string): Promise<never> {
+  const shop = process.env.SHOPIFY_SHOP
+  const secret = process.env.SHOPIFY_API_SECRET_KEY
+  if (shop && secret) {
+    const token = await makeSessionToken(shop, secret)
+    redirect(appendToken(path, token))
+  }
+  redirect(path)
+}
+```
+
+- [ ] **Step 6: Update layout.tsx to mount AuthTokenInit and read the token**
+
+```tsx
+// src/app/layout.tsx
+import type { Metadata } from "next";
+import { headers } from "next/headers";
+import AuthTokenInit from "@/components/AuthTokenInit";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "Sparkly Tails — Tiered Pricing",
+  description: "Volume pricing admin",
+};
+
+export default async function RootLayout({
+  children,
+}: Readonly<{ children: React.ReactNode }>) {
+  const authToken = (await headers()).get("x-auth-token") ?? "";
+
+  return (
+    <html lang="en">
+      <body>
+        <AuthTokenInit initialToken={authToken} />
+        {children}
+      </body>
+    </html>
+  );
+}
+```
+
+- [ ] **Step 7: Verify build**
+
+```bash
+npm run build
+```
+
+Expected: `Compiled successfully`.
+
+- [ ] **Step 8: Run lint to confirm the AuthLink rule is active**
+
+```bash
+npm run lint
+```
+
+Expected: no errors (nothing yet imports `next/link` outside `AuthLink.tsx`).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/lib/auth-token.ts src/lib/auth-redirect.ts src/lib/useAuthRouter.ts src/components/AuthTokenInit.tsx src/components/AuthLink.tsx src/app/layout.tsx
+git commit -m "Add stateless token plumbing, AuthLink, and root layout"
+```
+
+---
+
+### Task 4: Shopify GraphQL client
+
+**Files:**
+- Create: `src/lib/shopify-client.ts`
+- Test: `tests/lib/shopify-client.test.ts`
+
+**Interfaces:**
+- Consumes: `SHOPIFY_SHOP`, `SHOPIFY_ACCESS_TOKEN` env vars
+- Produces: `shopifyQuery<T>(query: string, variables?: Record<string, unknown>): Promise<T>` — used by `metafields.ts` (Task 5) and `shopify-discounts.ts` (Task 8).
+
+- [ ] **Step 1: Write the failing test**
+
+```typescript
+// tests/lib/shopify-client.test.ts
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { shopifyQuery } from '@/lib/shopify-client'
+
+describe('shopifyQuery', () => {
+  const originalFetch = global.fetch
+  const originalEnv = { ...process.env }
+
+  beforeEach(() => {
+    process.env.SHOPIFY_SHOP = 'test-shop.myshopify.com'
+    process.env.SHOPIFY_ACCESS_TOKEN = 'shpat_test_token'
+  })
+
+  afterEach(() => {
+    global.fetch = originalFetch
+    process.env = { ...originalEnv }
+  })
+
+  it('posts the query with the access token header and returns data', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      json: async () => ({ data: { shop: { name: 'Sparkly Tails' } } }),
+    }) as unknown as typeof fetch
+
+    const result = await shopifyQuery<{ shop: { name: string } }>(
+      'query { shop { name } }',
+    )
+
+    expect(result.shop.name).toBe('Sparkly Tails')
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://test-shop.myshopify.com/admin/api/2025-10/graphql.json',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          'X-Shopify-Access-Token': 'shpat_test_token',
+          'Content-Type': 'application/json',
+        }),
+      }),
+    )
+  })
+
+  it('throws when Shopify returns errors', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      json: async () => ({ errors: [{ message: 'Field does not exist' }] }),
+    }) as unknown as typeof fetch
+
+    await expect(shopifyQuery('query { bogus }')).rejects.toThrow('Field does not exist')
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+npm test -- tests/lib/shopify-client.test.ts
+```
+
+Expected: FAIL — `Cannot find module '@/lib/shopify-client'`.
+
+- [ ] **Step 3: Write shopify-client.ts**
+
+```typescript
+// src/lib/shopify-client.ts
+const SHOPIFY_API_VERSION = '2025-10'
+
+function apiUrl(): string {
+  const shop = process.env.SHOPIFY_SHOP
+  if (!shop) throw new Error('SHOPIFY_SHOP is not set')
+  return `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`
+}
+
+function accessToken(): string {
+  const token = process.env.SHOPIFY_ACCESS_TOKEN
+  if (!token) throw new Error('SHOPIFY_ACCESS_TOKEN is not set')
+  return token
+}
+
+export async function shopifyQuery<T>(
+  query: string,
+  variables?: Record<string, unknown>,
+): Promise<T> {
+  const res = await fetch(apiUrl(), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': accessToken(),
+    },
+    body: JSON.stringify({ query, variables }),
+  })
+  const json = await res.json()
+  if (json.errors) {
+    throw new Error(
+      Array.isArray(json.errors)
+        ? json.errors.map((e: { message: string }) => e.message).join('; ')
+        : JSON.stringify(json.errors),
+    )
+  }
+  return json.data as T
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+```bash
+npm test -- tests/lib/shopify-client.test.ts
+```
+
+Expected: PASS, 2 tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/lib/shopify-client.ts tests/lib/shopify-client.test.ts
+git commit -m "Add Shopify Admin GraphQL client"
+```
+
+---
+
+### Task 5: Metafield read/write layer
+
+**Files:**
+- Create: `src/lib/metafields.ts`
+- Test: `tests/lib/metafields.test.ts`
+
+**Interfaces:**
+- Consumes: `shopifyQuery` from `@/lib/shopify-client` (Task 4)
+- Produces:
+  - `type TierGroup = { id: string; name: string; status: 'draft' | 'live'; tiers: { minQty: number; percentOff: number }[]; productIds: string[]; discountIds: Record<string, Record<string, string>> }`
+  - `type Config = { groups: TierGroup[] }`
+  - `getConfig(): Promise<Config>`
+  - `saveConfig(config: Config): Promise<void>`
+  - `syncProductTiers(productId: string, groupId: string | null, config: Config): Promise<void>` — used by Task 7's `apply()` step to keep `product.sparkly_tiers.tiers` denormalised data current.
+
+  These types are the single definition every later task imports — do not redeclare `TierGroup` or `Config` anywhere else.
+
+- [ ] **Step 1: Write the failing test**
+
+```typescript
+// tests/lib/metafields.test.ts
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { getConfig, saveConfig, type Config } from '@/lib/metafields'
+import * as shopifyClient from '@/lib/shopify-client'
+
+describe('getConfig', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('returns an empty config when the metafield does not exist', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      shop: { metafield: null },
+    })
+
+    const config = await getConfig()
+    expect(config).toEqual({ groups: [] })
+  })
+
+  it('parses an existing config metafield', async () => {
+    const stored: Config = {
+      groups: [
+        {
+          id: 'grp_1',
+          name: 'Standard',
+          status: 'live',
+          tiers: [{ minQty: 5, percentOff: 14.7 }],
+          productIds: ['gid://shopify/Product/1'],
+          discountIds: {},
+        },
+      ],
+    }
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      shop: { metafield: { value: JSON.stringify(stored) } },
+    })
+
+    const config = await getConfig()
+    expect(config).toEqual(stored)
+  })
+})
+
+describe('saveConfig', () => {
+  it('writes the config as a JSON metafield via metafieldsSet', async () => {
+    const spy = vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      metafieldsSet: { userErrors: [] },
+    })
+
+    const config: Config = { groups: [] }
+    await saveConfig(config)
+
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining('metafieldsSet'),
+      expect.objectContaining({
+        metafields: expect.arrayContaining([
+          expect.objectContaining({
+            namespace: 'sparkly_tiers',
+            key: 'config',
+            type: 'json',
+            value: JSON.stringify(config),
+          }),
+        ]),
+      }),
+    )
+  })
+
+  it('throws if Shopify reports userErrors', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      metafieldsSet: { userErrors: [{ field: ['value'], message: 'too long' }] },
+    })
+
+    await expect(saveConfig({ groups: [] })).rejects.toThrow('too long')
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+npm test -- tests/lib/metafields.test.ts
+```
+
+Expected: FAIL — `Cannot find module '@/lib/metafields'`.
+
+- [ ] **Step 3: Write metafields.ts**
+
+```typescript
+// src/lib/metafields.ts
+import { shopifyQuery } from '@/lib/shopify-client'
+
+export interface Tier {
+  minQty: number
+  percentOff: number
+}
+
+export interface TierGroup {
+  id: string
+  name: string
+  status: 'draft' | 'live'
+  tiers: Tier[]
+  productIds: string[]
+  // productId → threshold (as string, e.g. "5") → DiscountAutomaticNode gid
+  discountIds: Record<string, Record<string, string>>
+}
+
+export interface Config {
+  groups: TierGroup[]
+}
+
+const NAMESPACE = 'sparkly_tiers'
+
+async function getShopId(): Promise<string> {
+  const data = await shopifyQuery<{ shop: { id: string } }>(
+    `query { shop { id } }`,
+  )
+  return data.shop.id
+}
+
+export async function getConfig(): Promise<Config> {
+  const data = await shopifyQuery<{
+    shop: { metafield: { value: string } | null }
+  }>(
+    `query getConfig($namespace: String!, $key: String!) {
+      shop {
+        metafield(namespace: $namespace, key: $key) { value }
+      }
+    }`,
+    { namespace: NAMESPACE, key: 'config' },
+  )
+
+  if (!data.shop.metafield) {
+    return { groups: [] }
+  }
+
+  return JSON.parse(data.shop.metafield.value) as Config
+}
+
+export async function saveConfig(config: Config): Promise<void> {
+  const shopId = await getShopId()
+
+  const data = await shopifyQuery<{
+    metafieldsSet: { userErrors: { field: string[]; message: string }[] }
+  }>(
+    `mutation setConfig($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        userErrors { field message }
+      }
+    }`,
+    {
+      metafields: [
+        {
+          ownerId: shopId,
+          namespace: NAMESPACE,
+          key: 'config',
+          type: 'json',
+          value: JSON.stringify(config),
+        },
+      ],
+    },
+  )
+
+  if (data.metafieldsSet.userErrors.length > 0) {
+    throw new Error(
+      data.metafieldsSet.userErrors.map((e) => e.message).join('; '),
+    )
+  }
+}
+
+export interface DenormalisedProductTier {
+  groupId: string
+  tiers: { minQty: number; unitPrice: string }[]
+}
+
+/**
+ * Rewrites the product's own tier metafield so the storefront widget (a
+ * separate Phase 2 project) can render tiers in Liquid with no API call.
+ * Called by the reconciler's apply() step after every config change.
+ * Pass `productTiers: null` to clear a product's tiers (e.g. when it's
+ * removed from a group).
+ */
+export async function syncProductTiers(
+  productId: string,
+  productTiers: DenormalisedProductTier | null,
+): Promise<void> {
+  const data = await shopifyQuery<{
+    metafieldsSet: { userErrors: { field: string[]; message: string }[] }
+  }>(
+    `mutation setProductTiers($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        userErrors { field message }
+      }
+    }`,
+    {
+      metafields: [
+        {
+          ownerId: productId,
+          namespace: NAMESPACE,
+          key: 'tiers',
+          type: 'json',
+          value: JSON.stringify(productTiers ?? {}),
+        },
+      ],
+    },
+  )
+
+  if (data.metafieldsSet.userErrors.length > 0) {
+    throw new Error(
+      data.metafieldsSet.userErrors.map((e) => e.message).join('; '),
+    )
+  }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+```bash
+npm test -- tests/lib/metafields.test.ts
+```
+
+Expected: PASS, 4 tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/lib/metafields.ts tests/lib/metafields.test.ts
+git commit -m "Add metafield read/write layer for tier config"
+```
+
+---
+
+### Task 6: Pure pricing math (`tier-math`)
+
+This is the task with the highest money-bug risk in the whole plan — see the spec's callout on `percentOff` (percentage) vs Shopify's `percentage` field (fraction). Test the conversion explicitly; do not let it hide inside a bigger function.
+
+**Files:**
+- Create: `src/lib/tier-math.ts`
+- Test: `tests/lib/tier-math.test.ts`
+
+**Interfaces:**
+- Consumes: nothing (pure)
+- Produces:
+  - `percentOffFromTargetPrice(basePrice: number, targetPrice: number): number` — returns a **percentage** (e.g. `14.7`), rounded to 1 decimal place
+  - `resultingPrice(basePrice: number, percentOff: number): number` — returns the actual price after Shopify-style rounding (2 decimal places, standard rounding), given a **percentage**
+  - `percentageToShopifyFraction(percentOff: number): number` — the ONLY place `percentOff / 100` happens; returns a fraction like `0.147` for use in `customerGets.value.percentage`
+  - These three functions are what Task 7 (reconciler) and Task 11 (admin UI) both call — never recompute this math elsewhere.
+
+- [ ] **Step 1: Write the failing tests**
+
+```typescript
+// tests/lib/tier-math.test.ts
+import { describe, it, expect } from 'vitest'
+import {
+  percentOffFromTargetPrice,
+  resultingPrice,
+  percentageToShopifyFraction,
+} from '@/lib/tier-math'
+
+describe('percentOffFromTargetPrice', () => {
+  it('computes the percent off needed to go from £1.70 to £1.45', () => {
+    // (1.70 - 1.45) / 1.70 * 100 = 14.705882... → rounds to 14.7
+    expect(percentOffFromTargetPrice(1.70, 1.45)).toBe(14.7)
+  })
+
+  it('computes 0% when target equals base price', () => {
+    expect(percentOffFromTargetPrice(1.70, 1.70)).toBe(0)
+  })
+})
+
+describe('resultingPrice', () => {
+  it('applies 14.7% off £1.70 and rounds to 2 decimal places', () => {
+    // 1.70 * (1 - 0.147) = 1.4501 → rounds to 1.45
+    expect(resultingPrice(1.70, 14.7)).toBe(1.45)
+  })
+
+  it('returns the base price unchanged at 0% off', () => {
+    expect(resultingPrice(1.70, 0)).toBe(1.70)
+  })
+
+  it('rounds up when the third decimal is 5 or more', () => {
+    // 1.70 * (1 - 0.176) = 1.4008 → rounds to 1.40
+    expect(resultingPrice(1.70, 17.6)).toBe(1.40)
+  })
+})
+
+describe('percentageToShopifyFraction', () => {
+  it('converts a stored percentage (14.7) to the fraction Shopify expects (0.147)', () => {
+    expect(percentageToShopifyFraction(14.7)).toBeCloseTo(0.147, 10)
+  })
+
+  it('converts 100% to 1.0', () => {
+    expect(percentageToShopifyFraction(100)).toBe(1)
+  })
+
+  it('converts 0% to 0', () => {
+    expect(percentageToShopifyFraction(0)).toBe(0)
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+npm test -- tests/lib/tier-math.test.ts
+```
+
+Expected: FAIL — `Cannot find module '@/lib/tier-math'`.
+
+- [ ] **Step 3: Write tier-math.ts**
+
+```typescript
+// src/lib/tier-math.ts
+
+/**
+ * Given a base price and the price you want customers to actually pay,
+ * returns the percentage off (e.g. 14.7 for 14.7%) needed to get there,
+ * rounded to 1 decimal place. This is a PERCENTAGE, not a fraction — see
+ * percentageToShopifyFraction for the conversion Shopify's API needs.
+ */
+export function percentOffFromTargetPrice(
+  basePrice: number,
+  targetPrice: number,
+): number {
+  const rawPercent = ((basePrice - targetPrice) / basePrice) * 100
+  return Math.round(rawPercent * 10) / 10
+}
+
+/**
+ * Given a base price and a percentage off (e.g. 14.7 for 14.7%), returns
+ * the actual price a customer pays, rounded to 2 decimal places using
+ * standard rounding — the same rounding Shopify applies at checkout.
+ */
+export function resultingPrice(basePrice: number, percentOff: number): number {
+  const fraction = percentageToShopifyFraction(percentOff)
+  const raw = basePrice * (1 - fraction)
+  return Math.round(raw * 100) / 100
+}
+
+/**
+ * Converts a stored percentage (14.7, meaning 14.7%) into the fraction
+ * Shopify's discountAutomaticBasicCreate customerGets.value.percentage
+ * field expects (0.147). THIS IS THE ONLY PLACE THIS CONVERSION HAPPENS.
+ * Config metafields always store percentages; Shopify's API always wants
+ * fractions. Mixing them up is a 10x pricing error in a live discount.
+ */
+export function percentageToShopifyFraction(percentOff: number): number {
+  return percentOff / 100
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+```bash
+npm test -- tests/lib/tier-math.test.ts
+```
+
+Expected: PASS, 7 tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/lib/tier-math.ts tests/lib/tier-math.test.ts
+git commit -m "Add pure tier-math library with percent/fraction conversion"
+```
+
+---
+
+### Task 7: Reconciler — diff desired config against actual discounts
+
+This is a pure function with no Shopify calls. It is the core correctness guarantee of the whole app: idempotent, all-or-nothing on budget, and produces the exact action list Task 8 will execute unmodified.
+
+**Files:**
+- Create: `src/lib/reconciler.ts`
+- Create: `tests/fixtures/groups.ts`
+- Test: `tests/lib/reconciler.test.ts`
+
+**Interfaces:**
+- Consumes: `Config`, `TierGroup`, `Tier` from `@/lib/metafields` (Task 5); `percentageToShopifyFraction` from `@/lib/tier-math` (Task 6)
+- Produces:
+  ```typescript
+  type ActualDiscount = {
+    id: string          // gid://shopify/DiscountAutomaticNode/...
+    productId: string
+    minQty: number
+    percentOff: number  // stored as percentage, same convention as config
+  }
+
+  type Action =
+    | { type: 'create'; productId: string; minQty: number; percentOff: number; title: string }
+    | { type: 'delete'; discountId: string }
+    | { type: 'update'; discountId: string; percentOff: number }
+
+  type ReconcileResult =
+    | { ok: true; actions: Action[] }
+    | { ok: false; reason: string }  // e.g. budget exceeded — no partial actions
+
+  reconcile(config: Config, actual: ActualDiscount[]): ReconcileResult
+  ```
+  This exact shape is what Task 8's `apply()` consumes.
+
+- [ ] **Step 1: Write the shared test fixtures**
+
+```typescript
+// tests/fixtures/groups.ts
+import type { Config, TierGroup } from '@/lib/metafields'
+
+export const standardGroup: TierGroup = {
+  id: 'grp_standard',
+  name: 'Standard voucher',
+  status: 'live',
+  tiers: [
+    { minQty: 5, percentOff: 14.7 },
+    { minQty: 10, percentOff: 17.6 },
+  ],
+  productIds: ['gid://shopify/Product/111'],
+  discountIds: {},
+}
+
+export const configWithOneGroup: Config = {
+  groups: [standardGroup],
+}
+
+export const emptyConfig: Config = { groups: [] }
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+```typescript
+// tests/lib/reconciler.test.ts
+import { describe, it, expect } from 'vitest'
+import { reconcile, type ActualDiscount } from '@/lib/reconciler'
+import { standardGroup, configWithOneGroup, emptyConfig } from '../fixtures/groups'
+import type { Config } from '@/lib/metafields'
+
+describe('reconcile — creating from scratch', () => {
+  it('creates one discount per tier per product when nothing exists yet', () => {
+    const result = reconcile(configWithOneGroup, [])
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+
+    expect(result.actions).toHaveLength(2)
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({ type: 'create', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7 }),
+    )
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({ type: 'create', productId: 'gid://shopify/Product/111', minQty: 10, percentOff: 17.6 }),
+    )
+  })
+
+  it('creates nothing for a draft group', () => {
+    const draftConfig: Config = {
+      groups: [{ ...standardGroup, status: 'draft' }],
+    }
+    const result = reconcile(draftConfig, [])
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toHaveLength(0)
+  })
+})
+
+describe('reconcile — idempotency', () => {
+  it('produces zero actions when actual state already matches desired state', () => {
+    const actual: ActualDiscount[] = [
+      { id: 'gid://shopify/DiscountAutomaticNode/aaa', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7 },
+      { id: 'gid://shopify/DiscountAutomaticNode/bbb', productId: 'gid://shopify/Product/111', minQty: 10, percentOff: 17.6 },
+    ]
+    const result = reconcile(configWithOneGroup, actual)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toHaveLength(0)
+  })
+})
+
+describe('reconcile — updates and deletes', () => {
+  it('emits an update when a tier percent changes', () => {
+    const actual: ActualDiscount[] = [
+      { id: 'gid://shopify/DiscountAutomaticNode/aaa', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 10.0 },
+      { id: 'gid://shopify/DiscountAutomaticNode/bbb', productId: 'gid://shopify/Product/111', minQty: 10, percentOff: 17.6 },
+    ]
+    const result = reconcile(configWithOneGroup, actual)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toEqual([
+      { type: 'update', discountId: 'gid://shopify/DiscountAutomaticNode/aaa', percentOff: 14.7 },
+    ])
+  })
+
+  it('deletes a discount whose tier was removed from the group', () => {
+    const configWithOneTier: Config = {
+      groups: [{ ...standardGroup, tiers: [{ minQty: 5, percentOff: 14.7 }] }],
+    }
+    const actual: ActualDiscount[] = [
+      { id: 'gid://shopify/DiscountAutomaticNode/aaa', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7 },
+      { id: 'gid://shopify/DiscountAutomaticNode/bbb', productId: 'gid://shopify/Product/111', minQty: 10, percentOff: 17.6 },
+    ]
+    const result = reconcile(configWithOneTier, actual)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toEqual([
+      { type: 'delete', discountId: 'gid://shopify/DiscountAutomaticNode/bbb' },
+    ])
+  })
+
+  it('deletes all discounts for a product removed from its group', () => {
+    const configNoProducts: Config = {
+      groups: [{ ...standardGroup, productIds: [] }],
+    }
+    const actual: ActualDiscount[] = [
+      { id: 'gid://shopify/DiscountAutomaticNode/aaa', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7 },
+      { id: 'gid://shopify/DiscountAutomaticNode/bbb', productId: 'gid://shopify/Product/111', minQty: 10, percentOff: 17.6 },
+    ]
+    const result = reconcile(configNoProducts, actual)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toEqual(
+      expect.arrayContaining([
+        { type: 'delete', discountId: 'gid://shopify/DiscountAutomaticNode/aaa' },
+        { type: 'delete', discountId: 'gid://shopify/DiscountAutomaticNode/bbb' },
+      ]),
+    )
+    expect(result.actions).toHaveLength(2)
+  })
+
+  it('deletes all discounts for a group that goes from live to draft', () => {
+    const actual: ActualDiscount[] = [
+      { id: 'gid://shopify/DiscountAutomaticNode/aaa', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7 },
+      { id: 'gid://shopify/DiscountAutomaticNode/bbb', productId: 'gid://shopify/Product/111', minQty: 10, percentOff: 17.6 },
+    ]
+    const draftConfig: Config = {
+      groups: [{ ...standardGroup, status: 'draft' }],
+    }
+    const result = reconcile(draftConfig, actual)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toEqual(
+      expect.arrayContaining([
+        { type: 'delete', discountId: 'gid://shopify/DiscountAutomaticNode/aaa' },
+        { type: 'delete', discountId: 'gid://shopify/DiscountAutomaticNode/bbb' },
+      ]),
+    )
+  })
+})
+
+describe('reconcile — slot budget', () => {
+  it('refuses all-or-nothing when the desired state would exceed 25 discounts', () => {
+    // 13 products x 2 tiers = 26 discounts, one over budget
+    const manyProductIds = Array.from({ length: 13 }, (_, i) => `gid://shopify/Product/${i}`)
+    const overBudgetConfig: Config = {
+      groups: [{ ...standardGroup, productIds: manyProductIds }],
+    }
+    const result = reconcile(overBudgetConfig, [])
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toMatch(/25/)
+  })
+
+  it('allows exactly 25 discounts', () => {
+    // 12 products x 2 tiers = 24, plus 1 more product's worth counted
+    // separately in a second group with 1 tier = 25 total
+    const twelveProducts = Array.from({ length: 12 }, (_, i) => `gid://shopify/Product/${i}`)
+    const exactBudgetConfig: Config = {
+      groups: [
+        { ...standardGroup, productIds: twelveProducts },
+        {
+          id: 'grp_extra',
+          name: 'Extra',
+          status: 'live',
+          tiers: [{ minQty: 3, percentOff: 5 }],
+          productIds: ['gid://shopify/Product/999'],
+          discountIds: {},
+        },
+      ],
+    }
+    const result = reconcile(exactBudgetConfig, [])
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toHaveLength(25)
+  })
+})
+
+describe('reconcile — empty config', () => {
+  it('produces no actions and no error for an empty config with no actual discounts', () => {
+    const result = reconcile(emptyConfig, [])
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toHaveLength(0)
+  })
+})
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+```bash
+npm test -- tests/lib/reconciler.test.ts
+```
+
+Expected: FAIL — `Cannot find module '@/lib/reconciler'`.
+
+- [ ] **Step 4: Write reconciler.ts**
+
+```typescript
+// src/lib/reconciler.ts
+import type { Config, TierGroup } from '@/lib/metafields'
+
+export interface ActualDiscount {
+  id: string
+  productId: string
+  minQty: number
+  percentOff: number
+}
+
+export type Action =
+  | { type: 'create'; productId: string; minQty: number; percentOff: number; title: string }
+  | { type: 'delete'; discountId: string }
+  | { type: 'update'; discountId: string; percentOff: number }
+
+export type ReconcileResult =
+  | { ok: true; actions: Action[] }
+  | { ok: false; reason: string }
+
+const MAX_ACTIVE_DISCOUNTS = 25
+
+interface DesiredDiscount {
+  productId: string
+  minQty: number
+  percentOff: number
+  title: string
+}
+
+function desiredDiscountsForGroup(group: TierGroup): DesiredDiscount[] {
+  if (group.status !== 'live') return []
+
+  const desired: DesiredDiscount[] = []
+  for (const productId of group.productIds) {
+    for (const tier of group.tiers) {
+      desired.push({
+        productId,
+        minQty: tier.minQty,
+        percentOff: tier.percentOff,
+        title: `Tiers: ${group.name} — ${productId} — ${tier.minQty}+`,
+      })
+    }
+  }
+  return desired
+}
+
+function key(productId: string, minQty: number): string {
+  return `${productId}::${minQty}`
+}
+
+/**
+ * Diffs the desired config against Shopify's actual automatic discounts and
+ * returns the exact set of create/update/delete actions needed to bring
+ * Shopify in line. Pure — no Shopify calls. Idempotent: calling this again
+ * with `actual` already matching `config` returns an empty action list.
+ * All-or-nothing on the 25-discount budget: if the desired state (across
+ * every live group) would exceed it, returns { ok: false } with no actions
+ * at all, rather than applying some and skipping others.
+ */
+export function reconcile(config: Config, actual: ActualDiscount[]): ReconcileResult {
+  const allDesired = config.groups.flatMap(desiredDiscountsForGroup)
+
+  if (allDesired.length > MAX_ACTIVE_DISCOUNTS) {
+    return {
+      ok: false,
+      reason: `Desired configuration requires ${allDesired.length} automatic discounts, exceeding Shopify's limit of ${MAX_ACTIVE_DISCOUNTS} active discounts per store.`,
+    }
+  }
+
+  const desiredByKey = new Map(allDesired.map((d) => [key(d.productId, d.minQty), d]))
+  const actualByKey = new Map(actual.map((a) => [key(a.productId, a.minQty), a]))
+
+  const actions: Action[] = []
+
+  for (const [k, desired] of desiredByKey) {
+    const existing = actualByKey.get(k)
+    if (!existing) {
+      actions.push({
+        type: 'create',
+        productId: desired.productId,
+        minQty: desired.minQty,
+        percentOff: desired.percentOff,
+        title: desired.title,
+      })
+    } else if (existing.percentOff !== desired.percentOff) {
+      actions.push({
+        type: 'update',
+        discountId: existing.id,
+        percentOff: desired.percentOff,
+      })
+    }
+  }
+
+  for (const [k, existing] of actualByKey) {
+    if (!desiredByKey.has(k)) {
+      actions.push({ type: 'delete', discountId: existing.id })
+    }
+  }
+
+  return { ok: true, actions }
+}
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+```bash
+npm test -- tests/lib/reconciler.test.ts
+```
+
+Expected: PASS, 9 tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/lib/reconciler.ts tests/fixtures/groups.ts tests/lib/reconciler.test.ts
+git commit -m "Add pure reconciler: diff desired config against actual discounts"
+```
+
+---
+
+### Task 8: Execute reconciler actions against Shopify
+
+**Files:**
+- Create: `src/lib/shopify-discounts.ts`
+- Test: `tests/lib/shopify-discounts.test.ts`
+
+**Interfaces:**
+- Consumes: `Action` from `@/lib/reconciler` (Task 7); `percentageToShopifyFraction` from `@/lib/tier-math` (Task 6); `shopifyQuery` from `@/lib/shopify-client` (Task 4)
+- Produces:
+  - `listActualDiscounts(): Promise<ActualDiscount[]>` — queries Shopify for all discounts this app manages (identified by title prefix `Tiers: `)
+  - `applyActions(actions: Action[]): Promise<Map<string, string>>` — executes each action, returns a map of `create` actions' `key(productId, minQty)` → newly created discount gid, so the caller can update `Config.groups[].discountIds`
+
+- [ ] **Step 1: Write the failing test**
+
+```typescript
+// tests/lib/shopify-discounts.test.ts
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { listActualDiscounts, applyActions } from '@/lib/shopify-discounts'
+import * as shopifyClient from '@/lib/shopify-client'
+import type { Action } from '@/lib/reconciler'
+
+describe('listActualDiscounts', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  it('parses discounts with the "Tiers: " title prefix into ActualDiscount shape', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      automaticDiscountNodes: {
+        edges: [
+          {
+            node: {
+              id: 'gid://shopify/DiscountAutomaticNode/aaa',
+              automaticDiscount: {
+                title: 'Tiers: Standard voucher — gid://shopify/Product/111 — 5+',
+                minimumRequirement: { greaterThanOrEqualToQuantity: '5' },
+                customerGets: {
+                  value: { percentage: 0.147 },
+                  items: { products: { productsToAdd: ['gid://shopify/Product/111'] } },
+                },
+              },
+            },
+          },
+        ],
+      },
+    })
+
+    const result = await listActualDiscounts()
+    expect(result).toEqual([
+      {
+        id: 'gid://shopify/DiscountAutomaticNode/aaa',
+        productId: 'gid://shopify/Product/111',
+        minQty: 5,
+        percentOff: 14.7,
+      },
+    ])
+  })
+
+  it('ignores discounts not created by this app', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      automaticDiscountNodes: {
+        edges: [
+          {
+            node: {
+              id: 'gid://shopify/DiscountAutomaticNode/zzz',
+              automaticDiscount: { title: 'BFCM 20% off everything' },
+            },
+          },
+        ],
+      },
+    })
+
+    const result = await listActualDiscounts()
+    expect(result).toEqual([])
+  })
+})
+
+describe('applyActions', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  it('creates a discount and returns its gid keyed by productId::minQty', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      discountAutomaticBasicCreate: {
+        automaticDiscountNode: { id: 'gid://shopify/DiscountAutomaticNode/new1' },
+        userErrors: [],
+      },
+    })
+
+    const actions: Action[] = [
+      { type: 'create', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7, title: 'Tiers: Standard — 111 — 5+' },
+    ]
+    const result = await applyActions(actions)
+    expect(result.get('gid://shopify/Product/111::5')).toBe('gid://shopify/DiscountAutomaticNode/new1')
+  })
+
+  it('throws if Shopify reports userErrors on create', async () => {
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      discountAutomaticBasicCreate: {
+        automaticDiscountNode: null,
+        userErrors: [{ field: ['title'], message: 'Title already taken' }],
+      },
+    })
+
+    const actions: Action[] = [
+      { type: 'create', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7, title: 'Tiers: dup' },
+    ]
+    await expect(applyActions(actions)).rejects.toThrow('Title already taken')
+  })
+
+  it('deletes a discount by id', async () => {
+    const spy = vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      discountAutomaticDelete: { userErrors: [] },
+    })
+
+    await applyActions([{ type: 'delete', discountId: 'gid://shopify/DiscountAutomaticNode/aaa' }])
+
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining('discountAutomaticDelete'),
+      expect.objectContaining({ id: 'gid://shopify/DiscountAutomaticNode/aaa' }),
+    )
+  })
+})
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+```bash
+npm test -- tests/lib/shopify-discounts.test.ts
+```
+
+Expected: FAIL — `Cannot find module '@/lib/shopify-discounts'`.
+
+- [ ] **Step 3: Write shopify-discounts.ts**
+
+```typescript
+// src/lib/shopify-discounts.ts
+import { shopifyQuery } from '@/lib/shopify-client'
+import { percentageToShopifyFraction } from '@/lib/tier-math'
+import type { Action, ActualDiscount } from '@/lib/reconciler'
+
+const TITLE_PREFIX = 'Tiers: '
+
+interface RawDiscountNode {
+  id: string
+  automaticDiscount: {
+    title: string
+    minimumRequirement?: { greaterThanOrEqualToQuantity?: string } | null
+    customerGets?: {
+      value: { percentage?: number }
+      items: { products?: { productsToAdd?: string[] } }
+    } | null
+  }
+}
+
+function parseDiscount(node: RawDiscountNode): ActualDiscount | null {
+  const { title, minimumRequirement, customerGets } = node.automaticDiscount
+  if (!title.startsWith(TITLE_PREFIX)) return null
+
+  const minQty = minimumRequirement?.greaterThanOrEqualToQuantity
+  const percentage = customerGets?.value.percentage
+  const productId = customerGets?.items.products?.productsToAdd?.[0]
+
+  if (!minQty || percentage === undefined || !productId) return null
+
+  return {
+    id: node.id,
+    productId,
+    minQty: parseInt(minQty, 10),
+    percentOff: Math.round(percentage * 1000) / 10, // fraction -> percentage, 1dp
+  }
+}
+
+/** Fetches all automatic discounts this app manages (identified by title prefix). */
+export async function listActualDiscounts(): Promise<ActualDiscount[]> {
+  const data = await shopifyQuery<{
+    automaticDiscountNodes: { edges: { node: RawDiscountNode }[] }
+  }>(
+    `query listDiscounts {
+      automaticDiscountNodes(first: 250) {
+        edges {
+          node {
+            id
+            automaticDiscount {
+              ... on DiscountAutomaticBasic {
+                title
+                minimumRequirement {
+                  ... on DiscountMinimumQuantity { greaterThanOrEqualToQuantity }
+                }
+                customerGets {
+                  value { ... on DiscountPercentage { percentage } }
+                  items { ... on DiscountProducts { productsToAdd: products { edges { node { id } } } } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }`,
+  )
+
+  return data.automaticDiscountNodes.edges
+    .map((e) => parseDiscount(e.node))
+    .filter((d): d is ActualDiscount => d !== null)
+}
+
+async function createDiscount(action: Extract<Action, { type: 'create' }>): Promise<string> {
+  const data = await shopifyQuery<{
+    discountAutomaticBasicCreate: {
+      automaticDiscountNode: { id: string } | null
+      userErrors: { field: string[]; message: string }[]
+    }
+  }>(
+    `mutation createTierDiscount($input: DiscountAutomaticBasicInput!) {
+      discountAutomaticBasicCreate(automaticBasicDiscount: $input) {
+        automaticDiscountNode { id }
+        userErrors { field message }
+      }
+    }`,
+    {
+      input: {
+        title: action.title,
+        startsAt: new Date().toISOString(),
+        minimumRequirement: {
+          quantity: { greaterThanOrEqualToQuantity: String(action.minQty) },
+        },
+        customerGets: {
+          value: { percentage: percentageToShopifyFraction(action.percentOff) },
+          items: { products: { productsToAdd: [action.productId] } },
+        },
+        combinesWith: {
+          productDiscounts: false,
+          orderDiscounts: true,
+          shippingDiscounts: true,
+        },
+      },
+    },
+  )
+
+  const { automaticDiscountNode, userErrors } = data.discountAutomaticBasicCreate
+  if (userErrors.length > 0) {
+    throw new Error(userErrors.map((e) => e.message).join('; '))
+  }
+  return automaticDiscountNode!.id
+}
+
+async function updateDiscount(action: Extract<Action, { type: 'update' }>): Promise<void> {
+  const data = await shopifyQuery<{
+    discountAutomaticBasicUpdate: { userErrors: { field: string[]; message: string }[] }
+  }>(
+    `mutation updateTierDiscount($id: ID!, $input: DiscountAutomaticBasicInput!) {
+      discountAutomaticBasicUpdate(id: $id, automaticBasicDiscount: $input) {
+        userErrors { field message }
+      }
+    }`,
+    {
+      id: action.discountId,
+      input: {
+        customerGets: {
+          value: { percentage: percentageToShopifyFraction(action.percentOff) },
+        },
+      },
+    },
+  )
+
+  if (data.discountAutomaticBasicUpdate.userErrors.length > 0) {
+    throw new Error(data.discountAutomaticBasicUpdate.userErrors.map((e) => e.message).join('; '))
+  }
+}
+
+async function deleteDiscount(action: Extract<Action, { type: 'delete' }>): Promise<void> {
+  const data = await shopifyQuery<{
+    discountAutomaticDelete: { userErrors: { field: string[]; message: string }[] }
+  }>(
+    `mutation deleteTierDiscount($id: ID!) {
+      discountAutomaticDelete(id: $id) {
+        userErrors { field message }
+      }
+    }`,
+    { id: action.discountId },
+  )
+
+  if (data.discountAutomaticDelete.userErrors.length > 0) {
+    throw new Error(data.discountAutomaticDelete.userErrors.map((e) => e.message).join('; '))
+  }
+}
+
+/**
+ * Executes reconciler actions in order. Returns a map of
+ * "productId::minQty" -> newly created discount gid, for `create` actions
+ * only, so the caller can update Config.groups[].discountIds.
+ */
+export async function applyActions(actions: Action[]): Promise<Map<string, string>> {
+  const created = new Map<string, string>()
+
+  for (const action of actions) {
+    if (action.type === 'create') {
+      const id = await createDiscount(action)
+      created.set(`${action.productId}::${action.minQty}`, id)
+    } else if (action.type === 'update') {
+      await updateDiscount(action)
+    } else {
+      await deleteDiscount(action)
+    }
+  }
+
+  return created
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+```bash
+npm test -- tests/lib/shopify-discounts.test.ts
+```
+
+Expected: PASS, 5 tests.
+
+- [ ] **Step 5: Run the full test suite**
+
+```bash
+npm test
+```
+
+Expected: all tests across all files pass (shopify-auth, shopify-client, metafields, tier-math, reconciler, shopify-discounts).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/lib/shopify-discounts.ts tests/lib/shopify-discounts.test.ts
+git commit -m "Add Shopify discount execution layer"
+```
+
+---
+
+### Task 9: Groups list page (admin home)
+
+**Files:**
+- Create: `src/app/page.tsx` (replaces Task 1 placeholder)
+
+**Interfaces:**
+- Consumes: `getConfig` from `@/lib/metafields` (Task 5); `AuthLink` from `@/components/AuthLink` (Task 3)
+- Produces: the app's home route, linked to by nothing yet (it's the root) but linking to `/groups/new` (Task 10) and `/groups/[groupId]` (Task 11)
+
+- [ ] **Step 1: Write the page**
+
+```tsx
+// src/app/page.tsx
+import { headers } from 'next/headers'
+import { getConfig } from '@/lib/metafields'
+import AuthLink from '@/components/AuthLink'
+
+const MAX_ACTIVE_DISCOUNTS = 25
+
+export default async function Home() {
+  const token = (await headers()).get('x-auth-token') ?? ''
+  const config = await getConfig()
+
+  const slotsUsed = config.groups
+    .filter((g) => g.status === 'live')
+    .reduce((sum, g) => sum + g.tiers.length * g.productIds.length, 0)
+
+  return (
+    <main className="p-8 max-w-3xl mx-auto">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold">Tiered Pricing</h1>
+        <AuthLink
+          href="/groups/new"
+          token={token}
+          className="bg-black text-white px-4 py-2 rounded"
+        >
+          New group
+        </AuthLink>
+      </div>
+
+      <p className="text-sm text-gray-600 mb-6">
+        {slotsUsed} of {MAX_ACTIVE_DISCOUNTS} discount slots used
+      </p>
+
+      {config.groups.length === 0 ? (
+        <p className="text-gray-500">No tier groups yet.</p>
+      ) : (
+        <ul className="divide-y">
+          {config.groups.map((group) => (
+            <li key={group.id} className="py-4">
+              <AuthLink href={`/groups/${group.id}`} token={token} className="font-medium hover:underline">
+                {group.name}
+              </AuthLink>
+              <p className="text-sm text-gray-500">
+                {group.status} · {group.tiers.length} tiers · {group.productIds.length} products
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </main>
+  )
+}
+```
+
+- [ ] **Step 2: Verify build**
+
+```bash
+npm run build
+```
+
+Expected: `Compiled successfully`. Note: this will attempt to call `getConfig()` at build time only if the route is statically analysed — since it reads `headers()`, Next.js will correctly mark it as dynamic and defer execution to request time, so a missing `SHOPIFY_ACCESS_TOKEN` at build time is not an error here.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/app/page.tsx
+git commit -m "Add tier groups list page"
+```
+
+---
+
+### Task 10: Create group Server Action + form
+
+**Files:**
+- Create: `src/actions/groupActions.ts`
+- Create: `src/app/groups/new/page.tsx`
+
+**Interfaces:**
+- Consumes: `getConfig`, `saveConfig`, `type TierGroup` from `@/lib/metafields` (Task 5); `redirectWithToken` from `@/lib/auth-redirect` (Task 3)
+- Produces: `createGroup(formData: FormData): Promise<void>` — a Server Action, exported for reuse by Task 11's tests if needed. Groups are created in `status: 'draft'` — reconciliation only happens when a group goes live (Task 11).
+
+- [ ] **Step 1: Write groupActions.ts with the create action**
+
+```typescript
+// src/actions/groupActions.ts
+'use server'
+
+import { getConfig, saveConfig, type TierGroup, type Tier } from '@/lib/metafields'
+import { redirectWithToken } from '@/lib/auth-redirect'
+import { randomUUID } from 'crypto'
+
+function parseTiersFromForm(formData: FormData): Tier[] {
+  const tiers: Tier[] = []
+  let i = 0
+  while (formData.has(`tier-${i}-minQty`)) {
+    const minQty = Number(formData.get(`tier-${i}-minQty`))
+    const percentOff = Number(formData.get(`tier-${i}-percentOff`))
+    if (minQty > 0 && percentOff >= 0) {
+      tiers.push({ minQty, percentOff })
+    }
+    i++
+  }
+  return tiers.sort((a, b) => a.minQty - b.minQty)
+}
+
+export async function createGroup(formData: FormData): Promise<void> {
+  const name = String(formData.get('name') ?? '').trim()
+  if (!name) throw new Error('Group name is required')
+
+  const tiers = parseTiersFromForm(formData)
+  if (tiers.length === 0) throw new Error('At least one tier is required')
+
+  const config = await getConfig()
+
+  const newGroup: TierGroup = {
+    id: `grp_${randomUUID()}`,
+    name,
+    status: 'draft',
+    tiers,
+    productIds: [],
+    discountIds: {},
+  }
+
+  await saveConfig({ groups: [...config.groups, newGroup] })
+
+  await redirectWithToken(`/groups/${newGroup.id}`)
+}
+```
+
+- [ ] **Step 2: Write the new-group form page**
+
+```tsx
+// src/app/groups/new/page.tsx
+import { createGroup } from '@/actions/groupActions'
+
+export default function NewGroupPage() {
+  return (
+    <main className="p-8 max-w-xl mx-auto">
+      <h1 className="text-2xl font-semibold mb-6">New tier group</h1>
+
+      <form action={createGroup} className="space-y-6">
+        <div>
+          <label htmlFor="name" className="block text-sm font-medium mb-1">
+            Group name
+          </label>
+          <input
+            id="name"
+            name="name"
+            type="text"
+            required
+            placeholder="Standard voucher"
+            className="w-full border rounded px-3 py-2"
+          />
+        </div>
+
+        <div>
+          <p className="block text-sm font-medium mb-2">Tiers</p>
+          <div className="space-y-2">
+            {[0, 1].map((i) => (
+              <div key={i} className="flex gap-2 items-center">
+                <input
+                  name={`tier-${i}-minQty`}
+                  type="number"
+                  min="1"
+                  placeholder="Min qty (e.g. 5)"
+                  className="border rounded px-3 py-2 w-40"
+                />
+                <span className="text-sm text-gray-500">+ units →</span>
+                <input
+                  name={`tier-${i}-percentOff`}
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  placeholder="% off (e.g. 14.7)"
+                  className="border rounded px-3 py-2 w-40"
+                />
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            Enter percent-off directly. The next screen shows the actual
+            resulting price for each assigned product before you save.
+          </p>
+        </div>
+
+        <button type="submit" className="bg-black text-white px-4 py-2 rounded">
+          Create draft group
+        </button>
+      </form>
+    </main>
+  )
+}
+```
+
+- [ ] **Step 3: Verify build**
+
+```bash
+npm run build
+```
+
+Expected: `Compiled successfully`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/actions/groupActions.ts src/app/groups/new/page.tsx
+git commit -m "Add create-group Server Action and form"
+```
+
+---
+
+### Task 11: Group editor — product assignment, slot meter, go-live reconciliation
+
+This is where the reconciler (Task 7) and executor (Task 8) actually get invoked from the UI for the first time. Going live runs `reconcile()` then `applyActions()`, then writes the returned discount ids back into `Config` and calls `syncProductTiers` for every affected product.
+
+**Files:**
+- Modify: `src/actions/groupActions.ts` (add `updateGroup`, `assignProducts`, `setGroupStatus`)
+- Create: `src/app/groups/[groupId]/page.tsx`
+
+**Interfaces:**
+- Consumes: everything from Tasks 5, 6, 7, 8, plus `createGroup` context from Task 10
+- Produces: `setGroupStatus(groupId: string, status: 'draft' | 'live'): Promise<void>` — the function that performs reconciliation; this is the end of the Phase 1 chain, nothing later consumes it within this plan (Phase 2's storefront widget reads `product.sparkly_tiers.tiers` directly, written by this action via `syncProductTiers`)
+
+- [ ] **Step 1: Add the remaining Server Actions to groupActions.ts**
+
+Append to `src/actions/groupActions.ts` (the file created in Task 10):
+
+```typescript
+// --- append to src/actions/groupActions.ts ---
+
+import { reconcile } from '@/lib/reconciler'
+import { listActualDiscounts, applyActions } from '@/lib/shopify-discounts'
+import { syncProductTiers } from '@/lib/metafields'
+import { resultingPrice } from '@/lib/tier-math'
+
+export async function assignProducts(groupId: string, formData: FormData): Promise<void> {
+  const productIdsRaw = String(formData.get('productIds') ?? '')
+  const productIds = productIdsRaw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+
+  const config = await getConfig()
+  const group = config.groups.find((g) => g.id === groupId)
+  if (!group) throw new Error(`Group ${groupId} not found`)
+
+  group.productIds = productIds
+  await saveConfig(config)
+
+  await redirectWithToken(`/groups/${groupId}`)
+}
+
+/**
+ * Flips a group's status and reconciles Shopify's automatic discounts to
+ * match. This is the only place reconciliation runs. Refuses (throws,
+ * leaving the group's prior status in place) if going live would exceed
+ * the 25-discount budget — see reconcile()'s ok:false path.
+ */
+export async function setGroupStatus(groupId: string, status: 'draft' | 'live'): Promise<void> {
+  const config = await getConfig()
+  const group = config.groups.find((g) => g.id === groupId)
+  if (!group) throw new Error(`Group ${groupId} not found`)
+
+  const previousStatus = group.status
+  group.status = status
+
+  const actual = await listActualDiscounts()
+  const result = reconcile(config, actual)
+
+  if (!result.ok) {
+    group.status = previousStatus
+    throw new Error(result.reason)
+  }
+
+  const createdIds = await applyActions(result.actions)
+
+  // Update discountIds for every product in every group with the newly
+  // created discount gids, and remove entries for anything deleted.
+  const deletedIds = new Set(
+    result.actions.filter((a) => a.type === 'delete').map((a) => a.discountId),
+  )
+  for (const g of config.groups) {
+    for (const productId of Object.keys(g.discountIds)) {
+      for (const minQty of Object.keys(g.discountIds[productId])) {
+        if (deletedIds.has(g.discountIds[productId][minQty])) {
+          delete g.discountIds[productId][minQty]
+        }
+      }
+    }
+  }
+  for (const [k, discountId] of createdIds) {
+    const [productId, minQtyStr] = k.split('::')
+    const targetGroup = config.groups.find((g) => g.productIds.includes(productId))
+    if (targetGroup) {
+      targetGroup.discountIds[productId] ??= {}
+      targetGroup.discountIds[productId][minQtyStr] = discountId
+    }
+  }
+
+  await saveConfig(config)
+
+  // Rewrite the denormalised per-product metafield for every product
+  // touched by this status change, so the storefront widget (Phase 2)
+  // reads current data.
+  for (const productId of group.productIds) {
+    if (group.status === 'live') {
+      await syncProductTiers(productId, {
+        groupId: group.id,
+        tiers: group.tiers.map((t) => ({
+          minQty: t.minQty,
+          unitPrice: '0.00', // Phase 1 has no base-price lookup yet; Task 11 Step 4 below computes real values in the UI. Storefront rendering is a Phase 2 concern.
+        })),
+      })
+    } else {
+      await syncProductTiers(productId, null)
+    }
+  }
+
+  await redirectWithToken(`/groups/${groupId}`)
+}
+```
+
+> **Note on the placeholder `unitPrice: '0.00'` above:** Phase 1's scope is the discount engine and admin UI, not the storefront widget (Phase 2). The denormalised product metafield's `unitPrice` field is written as a placeholder here because computing it requires fetching each product's real base price from Shopify — out of scope until Phase 2 defines exactly how the widget consumes this data. This is intentionally visible (not hidden in a TODO comment) so Phase 2's plan must explicitly address it before the storefront can render correct prices.
+
+- [ ] **Step 2: Write the group editor page**
+
+```tsx
+// src/app/groups/[groupId]/page.tsx
+import { headers } from 'next/headers'
+import { notFound } from 'next/navigation'
+import { getConfig } from '@/lib/metafields'
+import { resultingPrice } from '@/lib/tier-math'
+import { assignProducts, setGroupStatus } from '@/actions/groupActions'
+
+const MAX_ACTIVE_DISCOUNTS = 25
+
+export default async function GroupPage({
+  params,
+}: {
+  params: Promise<{ groupId: string }>
+}) {
+  const { groupId } = await params
+  await headers() // establishes request context for auth token, not used directly on this read-only page yet
+  const config = await getConfig()
+  const group = config.groups.find((g) => g.id === groupId)
+
+  if (!group) notFound()
+
+  const slotsUsed = config.groups
+    .filter((g) => g.status === 'live')
+    .reduce((sum, g) => sum + g.tiers.length * g.productIds.length, 0)
+
+  const thisGroupSlots = group.tiers.length * group.productIds.length
+
+  const assignProductsWithId = assignProducts.bind(null, groupId)
+  const goLive = setGroupStatus.bind(null, groupId, 'live')
+  const goDraft = setGroupStatus.bind(null, groupId, 'draft')
+
+  // Example base price for preview purposes only — Phase 2 will read real
+  // per-product base prices. Shown here so target-price rounding (spec §4)
+  // is visible before the group goes live.
+  const examplePrice = 1.70
+
+  return (
+    <main className="p-8 max-w-2xl mx-auto">
+      <h1 className="text-2xl font-semibold mb-2">{group.name}</h1>
+      <p className="text-sm text-gray-500 mb-6">
+        {group.status} · {slotsUsed} of {MAX_ACTIVE_DISCOUNTS} store-wide discount slots used
+        ({thisGroupSlots} from this group)
+      </p>
+
+      <section className="mb-8">
+        <h2 className="font-medium mb-2">Tiers</h2>
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="text-left border-b">
+              <th className="py-1">Min qty</th>
+              <th className="py-1">% off</th>
+              <th className="py-1">Resulting price (example, £{examplePrice.toFixed(2)} base)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {group.tiers.map((tier) => (
+              <tr key={tier.minQty} className="border-b">
+                <td className="py-1">{tier.minQty}+</td>
+                <td className="py-1">{tier.percentOff}%</td>
+                <td className="py-1">£{resultingPrice(examplePrice, tier.percentOff).toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="mb-8">
+        <h2 className="font-medium mb-2">Assigned products</h2>
+        <form action={assignProductsWithId} className="space-y-2">
+          <textarea
+            name="productIds"
+            defaultValue={group.productIds.join(', ')}
+            placeholder="gid://shopify/Product/123, gid://shopify/Product/456"
+            className="w-full border rounded px-3 py-2 text-sm"
+            rows={3}
+          />
+          <button type="submit" className="bg-gray-200 px-4 py-2 rounded text-sm">
+            Save product list
+          </button>
+        </form>
+      </section>
+
+      <section>
+        {group.status === 'draft' ? (
+          <form action={goLive}>
+            <button type="submit" className="bg-black text-white px-4 py-2 rounded">
+              Go live
+            </button>
+          </form>
+        ) : (
+          <form action={goDraft}>
+            <button type="submit" className="bg-red-600 text-white px-4 py-2 rounded">
+              Take offline
+            </button>
+          </form>
+        )}
+      </section>
+    </main>
+  )
+}
+```
+
+- [ ] **Step 3: Verify build**
+
+```bash
+npm run build
+```
+
+Expected: `Compiled successfully`.
+
+- [ ] **Step 4: Run the full test suite one more time to confirm nothing regressed**
+
+```bash
+npm test
+```
+
+Expected: all tests pass.
+
+- [ ] **Step 5: Bump APP_VERSION and commit**
+
+Per the global constraint, every commit that changes code bumps the version. This is the last task of Phase 1, shipping the full feature — a minor bump.
+
+Edit `package.json`: change `"version": "0.1.0"` to `"version": "0.2.0"`.
+
+```bash
+git add src/actions/groupActions.ts src/app/groups/[groupId]/page.tsx package.json
+git commit -m "Add group editor: product assignment, slot meter, go-live reconciliation (v0.2.0)"
+```
+
+---
+
+## Self-Review
+
+**1. Spec coverage.** Checked every numbered section of the design spec against the tasks above:
+
+- §2.1 (Partners dev app, not Develop-apps) → Task 2 implements Partners OAuth exactly.
+- §2.2 (native discounts, no Functions) → Task 8's `createDiscount` uses `discountAutomaticBasicCreate`; no Function code anywhere.
+- §2.3 (per-product threshold semantics) → Task 7's `desiredDiscountsForGroup` creates one discount per product per tier, never a multi-product discount.
+- §2.4 (loose units only, no bundles) → nothing in Tasks 1–11 creates a variant or bundle; out of scope per spec §10, correctly absent.
+- §2.5 (app-generated feed) → explicitly out of scope for this plan (Phase 3), covered by Part A (Phase 0 spike) only.
+- §2.6 (metafields, no database) → Task 5 (`metafields.ts`) and Task 2's callback (logs token instead of writing to a DB).
+- §3 (architecture diagram) → Tasks 4/5 (metafield layer), 6/7/8 (engine), 9–11 (admin UI) collectively implement the left two-thirds of the diagram. The theme extension and feed endpoint (right side) are correctly Phase 2/3, out of this plan's scope.
+- §4 (data model: `shop.sparkly_tiers.config`, `product.sparkly_tiers.tiers`, percent-off units) → Task 5 implements both metafields with the exact namespace/key; Task 6 implements the percent/fraction distinction with a dedicated test.
+- §5.1 (reconciler: idempotent, self-healing, budget-safe) → Task 7's test suite covers idempotency (test: "produces zero actions when actual state already matches"), self-healing (implicit: `listActualDiscounts` reads real Shopify state every time, so hand-edits are detected as diffs), and all-or-nothing budget refusal (2 dedicated tests).
+- §5.1 discount shape (`combinesWith: productDiscounts: false`) → hard-coded in Task 8's `createDiscount`.
+- §5.2 (admin UI: groups list, group editor, slot meter, settings) → Tasks 9, 10, 11 cover groups list, create, edit/assign/go-live, and the slot meter. **Gap found: the spec's "Settings — copy templates and CSS" (§5.2, §3 `shop.sparkly_tiers.settings`) has no task.** This is intentionally deferred: settings only matter to the Phase 2 storefront widget's rendering, and building a settings UI with no consumer yet would be speculative. Noting this explicitly rather than silently dropping it — Phase 2's plan must add the settings metafield and its editor page before the widget can read it.
+- §5.3 (theme app extension / widget) → out of scope, Phase 2, correctly absent.
+- §5.4 (feed endpoint) → out of scope, Phase 3, correctly absent.
+- §6 (auth) → Tasks 2–3 implement this exactly, copied from the proven `sparkly-tails-pickup-app` implementation.
+- §7 (phasing) → this plan explicitly covers only Phase 0 (Part A) and Phase 1 (Part B), per the spec's own "Planning scope" note added during self-review.
+- §8 (testing: pure units carry correctness) → `tier-math`, `reconciler` are 100% pure and fully unit-tested (Tasks 6, 7); `feed` is out of scope (Phase 3).
+- §9 (risks) → feed price-match risk is Part A's entire purpose; 25-slot cap is Task 7/11's slot meter and all-or-nothing refusal; rounding is Task 6's `resultingPrice` plus its visible display in Task 11's group page; token-in-env trade-off is Task 2 Step 7's explicit design.
+- §10 (out of scope) → confirmed nothing in this plan builds bundles, buyable packs, Functions, multi-shop storage, or mix-and-match groups.
+
+**2. Placeholder scan.** One placeholder found and kept deliberately visible rather than removed: Task 11 Step 1's `unitPrice: '0.00'` in `syncProductTiers`. This is flagged inline with a note explaining why (Phase 1 has no base-price lookup in scope) and what must happen before Phase 2 can proceed — this is a documented scope boundary, not a "TBD" left for the implementer to guess at. No other TBD/TODO/"add proper handling" patterns found.
+
+**3. Type consistency.** Traced every shared type/function across task boundaries:
+- `Config`, `TierGroup`, `Tier` — defined once in Task 5, imported (never redeclared) by Tasks 7, 10, 11.
+- `ActualDiscount`, `Action`, `ReconcileResult` — defined once in Task 7, imported by Task 8 and Task 11.
+- `percentOffFromTargetPrice`, `resultingPrice`, `percentageToShopifyFraction` — defined once in Task 6; `resultingPrice` used in Task 11's page, `percentageToShopifyFraction` used in Task 8's `createDiscount`/`listActualDiscounts`. Names match exactly at every call site.
+- `shopifyQuery<T>` — defined once in Task 4, imported by Tasks 5 and 8 with no signature drift.
+- `redirectWithToken`, `appendToken`, `setAuthToken`/`getAuthToken` — defined once in Task 3, imported by Task 10/11's Server Actions and Task 9's page.
+- `syncProductTiers(productId, productTiers)` — defined in Task 5 with a nullable second parameter; called in Task 11 with either a real object or `null`, matching the signature.
+
+No drift found between definition and call sites.
+
+---
+
+Plan complete and saved to `docs/superpowers/plans/2026-07-17-shopify-tiered-pricing-phase-0-1.md`. Two execution options:
+
+**1. Subagent-Driven (recommended)** - I dispatch a fresh subagent per task, review between tasks, fast iteration
+
+**2. Inline Execution** - Execute tasks in this session using executing-plans, batch execution with checkpoints
+
+**Which approach?**
