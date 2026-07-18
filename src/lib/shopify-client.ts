@@ -24,7 +24,26 @@ export async function shopifyQuery<T>(
     },
     body: JSON.stringify({ query, variables }),
   })
-  const json = await res.json()
+
+  // Shopify (or the proxy/gateway in front of it) can return a non-JSON
+  // body on real failure paths — an HTML error page on a 502, plain text
+  // on some 429s. Without this, res.json() throws a bare native
+  // SyntaxError with no HTTP status and no indication the failure came
+  // from Shopify at all, and every caller of this module inherits that
+  // opacity.
+  let json: { data?: T; errors?: unknown }
+  try {
+    json = await res.json()
+  } catch (err) {
+    throw new Error(
+      `Shopify API returned a non-JSON response (HTTP ${res.status} ${res.statusText}): ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+
+  if (!res.ok) {
+    throw new Error(`Shopify API error (HTTP ${res.status}): ${JSON.stringify(json)}`)
+  }
+
   if (json.errors) {
     throw new Error(
       Array.isArray(json.errors)

@@ -1,3 +1,4 @@
+// tests/lib/shopify-client.test.ts
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { shopifyQuery } from '@/lib/shopify-client'
 
@@ -17,6 +18,9 @@ describe('shopifyQuery', () => {
 
   it('posts the query with the access token header and returns data', async () => {
     global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
       json: async () => ({ data: { shop: { name: 'Sparkly Tails' } } }),
     }) as unknown as typeof fetch
 
@@ -39,9 +43,36 @@ describe('shopifyQuery', () => {
 
   it('throws when Shopify returns errors', async () => {
     global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
       json: async () => ({ errors: [{ message: 'Field does not exist' }] }),
     }) as unknown as typeof fetch
 
     await expect(shopifyQuery('query { bogus }')).rejects.toThrow('Field does not exist')
+  })
+
+  it('throws a diagnosable error when the response body is not valid JSON', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON at position 0')
+      },
+    }) as unknown as typeof fetch
+
+    await expect(shopifyQuery('query { shop { name } }')).rejects.toThrow(/HTTP 502/)
+  })
+
+  it('throws a diagnosable error for a non-2xx response with a JSON body', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      statusText: 'Too Many Requests',
+      json: async () => ({ message: 'Exceeded rate limit' }),
+    }) as unknown as typeof fetch
+
+    await expect(shopifyQuery('query { shop { name } }')).rejects.toThrow(/HTTP 429/)
   })
 })
