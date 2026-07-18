@@ -24,7 +24,11 @@ export default function AuthTokenInit({ initialToken }: { initialToken: string }
         return originalFetch(input, init)
       }
 
-      const isSameOrigin = url.startsWith('/') || url.startsWith(origin)
+      // Resolve against `origin` rather than a startsWith() check — a plain
+      // string-prefix test treats protocol-relative URLs like
+      // "//evil.example.com/x" as same-origin (they also start with "/"),
+      // which would attach the live auth token to a third-party request.
+      const isSameOrigin = new URL(url, origin).origin === origin
       if (!isSameOrigin) {
         return originalFetch(input, init)
       }
