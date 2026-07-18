@@ -157,3 +157,42 @@ describe('reconcile — empty config', () => {
     expect(result.actions).toHaveLength(0)
   })
 })
+
+describe('reconcile — duplicate desired across groups', () => {
+  it('refuses when the same product+threshold is desired by two different live groups', () => {
+    const conflictingConfig: Config = {
+      groups: [
+        standardGroup, // live, product 111, tiers 5+/10+
+        {
+          id: 'grp_holiday',
+          name: 'Holiday Special',
+          status: 'live',
+          tiers: [{ minQty: 5, percentOff: 25 }],
+          productIds: ['gid://shopify/Product/111'],
+          discountIds: {},
+        },
+      ],
+    }
+    const result = reconcile(conflictingConfig, [])
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toMatch(/Standard voucher/)
+    expect(result.reason).toMatch(/Holiday Special/)
+  })
+})
+
+describe('reconcile — duplicate actual (drift)', () => {
+  it('deletes orphaned duplicate discounts for the same product+threshold, keeping one reconciled', () => {
+    const actual: ActualDiscount[] = [
+      { id: 'gid://shopify/DiscountAutomaticNode/aaa', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7 },
+      { id: 'gid://shopify/DiscountAutomaticNode/orphan', productId: 'gid://shopify/Product/111', minQty: 5, percentOff: 14.7 },
+      { id: 'gid://shopify/DiscountAutomaticNode/bbb', productId: 'gid://shopify/Product/111', minQty: 10, percentOff: 17.6 },
+    ]
+    const result = reconcile(configWithOneGroup, actual)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.actions).toEqual([
+      { type: 'delete', discountId: 'gid://shopify/DiscountAutomaticNode/orphan' },
+    ])
+  })
+})
