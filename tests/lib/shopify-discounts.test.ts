@@ -18,7 +18,7 @@ describe('listActualDiscounts', () => {
                 minimumRequirement: { greaterThanOrEqualToQuantity: '5' },
                 customerGets: {
                   value: { percentage: 0.147 },
-                  items: { products: { productsToAdd: ['gid://shopify/Product/111'] } },
+                  items: { productsToAdd: { edges: [{ node: { id: 'gid://shopify/Product/111' } }] } },
                 },
               },
             },
@@ -46,6 +46,29 @@ describe('listActualDiscounts', () => {
             node: {
               id: 'gid://shopify/DiscountAutomaticNode/zzz',
               automaticDiscount: { title: 'BFCM 20% off everything' },
+            },
+          },
+        ],
+      },
+    })
+
+    const result = await listActualDiscounts()
+    expect(result).toEqual([])
+  })
+
+  it('skips a discount node whose type is not DiscountAutomaticBasic, rather than crashing', async () => {
+    // Simulates a free-shipping (or other non-Basic) automatic discount in
+    // the store: the query's `... on DiscountAutomaticBasic` fragment
+    // contributes no fields for a node of a different resolved type, so
+    // `automaticDiscount` comes back with no `title` at all — not because a
+    // real Basic discount can lack one.
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      automaticDiscountNodes: {
+        edges: [
+          {
+            node: {
+              id: 'gid://shopify/DiscountAutomaticNode/free-ship',
+              automaticDiscount: {},
             },
           },
         ],
