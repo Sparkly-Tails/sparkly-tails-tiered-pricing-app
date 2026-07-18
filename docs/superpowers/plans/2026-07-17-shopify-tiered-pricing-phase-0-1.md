@@ -983,6 +983,9 @@ describe('shopifyQuery', () => {
 
   it('posts the query with the access token header and returns data', async () => {
     global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
       json: async () => ({ data: { shop: { name: 'Sparkly Tails' } } }),
     }) as unknown as typeof fetch
 
@@ -1005,10 +1008,40 @@ describe('shopifyQuery', () => {
 
   it('throws when Shopify returns errors', async () => {
     global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
       json: async () => ({ errors: [{ message: 'Field does not exist' }] }),
     }) as unknown as typeof fetch
 
     await expect(shopifyQuery('query { bogus }')).rejects.toThrow('Field does not exist')
+  })
+
+  it('throws a diagnosable error when the response body is not valid JSON', async () => {
+    // Simulates a gateway/proxy error page (e.g. a 502 returning HTML)
+    // instead of Shopify's own JSON — must not crash with a bare
+    // cryptic SyntaxError.
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: 'Bad Gateway',
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON at position 0')
+      },
+    }) as unknown as typeof fetch
+
+    await expect(shopifyQuery('query { shop { name } }')).rejects.toThrow(/HTTP 502/)
+  })
+
+  it('throws a diagnosable error for a non-2xx response with a JSON body', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      statusText: 'Too Many Requests',
+      json: async () => ({ message: 'Exceeded rate limit' }),
+    }) as unknown as typeof fetch
+
+    await expect(shopifyQuery('query { shop { name } }')).rejects.toThrow(/HTTP 429/)
   })
 })
 ```
@@ -1051,7 +1084,26 @@ export async function shopifyQuery<T>(
     },
     body: JSON.stringify({ query, variables }),
   })
-  const json = await res.json()
+
+  // Shopify (or the proxy/gateway in front of it) can return a non-JSON
+  // body on real failure paths — an HTML error page on a 502, plain text
+  // on some 429s. Without this, res.json() throws a bare native
+  // SyntaxError with no HTTP status and no indication the failure came
+  // from Shopify at all, and every caller of this module inherits that
+  // opacity.
+  let json: { data?: T; errors?: unknown }
+  try {
+    json = await res.json()
+  } catch (err) {
+    throw new Error(
+      `Shopify API returned a non-JSON response (HTTP ${res.status} ${res.statusText}): ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+
+  if (!res.ok) {
+    throw new Error(`Shopify API error (HTTP ${res.status}): ${JSON.stringify(json)}`)
+  }
+
   if (json.errors) {
     throw new Error(
       Array.isArray(json.errors)
@@ -1069,7 +1121,7 @@ export async function shopifyQuery<T>(
 npm test -- tests/lib/shopify-client.test.ts
 ```
 
-Expected: PASS, 2 tests.
+Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Bump APP_VERSION**
 
