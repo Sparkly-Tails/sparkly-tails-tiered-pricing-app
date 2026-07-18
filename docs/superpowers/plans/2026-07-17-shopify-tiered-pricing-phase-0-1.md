@@ -2013,6 +2013,10 @@ describe('listActualDiscounts', () => {
   beforeEach(() => vi.restoreAllMocks())
 
   it('parses discounts with the "Tiers: " title prefix into ActualDiscount shape', async () => {
+    // Mock shape matches what the query's `productsToAdd: products` alias
+    // actually returns — a connection (edges/node), directly under `items`,
+    // not a flat array nested under a `products` object. A mismatched mock
+    // here would hide the exact bug this test exists to catch.
     vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
       automaticDiscountNodes: {
         edges: [
@@ -2024,7 +2028,7 @@ describe('listActualDiscounts', () => {
                 minimumRequirement: { greaterThanOrEqualToQuantity: '5' },
                 customerGets: {
                   value: { percentage: 0.147 },
-                  items: { products: { productsToAdd: ['gid://shopify/Product/111'] } },
+                  items: { productsToAdd: { edges: [{ node: { id: 'gid://shopify/Product/111' } }] } },
                 },
               },
             },
@@ -2052,6 +2056,29 @@ describe('listActualDiscounts', () => {
             node: {
               id: 'gid://shopify/DiscountAutomaticNode/zzz',
               automaticDiscount: { title: 'BFCM 20% off everything' },
+            },
+          },
+        ],
+      },
+    })
+
+    const result = await listActualDiscounts()
+    expect(result).toEqual([])
+  })
+
+  it('skips a discount node whose type is not DiscountAutomaticBasic, rather than crashing', async () => {
+    // Simulates a free-shipping (or other non-Basic) automatic discount in
+    // the store: the query's `... on DiscountAutomaticBasic` fragment
+    // contributes no fields for a node of a different resolved type, so
+    // `automaticDiscount` comes back with no `title` at all — not because a
+    // real Basic discount can lack one.
+    vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      automaticDiscountNodes: {
+        edges: [
+          {
+            node: {
+              id: 'gid://shopify/DiscountAutomaticNode/free-ship',
+              automaticDiscount: {},
             },
           },
         ],
@@ -2131,22 +2158,32 @@ const TITLE_PREFIX = 'Tiers: '
 interface RawDiscountNode {
   id: string
   automaticDiscount: {
-    title: string
+    // No fields here are guaranteed present: the `... on DiscountAutomaticBasic`
+    // fragment in the query below only contributes fields when the node's
+    // resolved type actually IS DiscountAutomaticBasic. Any other automatic
+    // discount type in the store (this app never creates one, but a human
+    // could, e.g. a free-shipping promo) comes back as an empty object here —
+    // not because a real Basic discount can lack a title, but because the
+    // fragment didn't match. Treat every field as optional and skip nodes
+    // that don't parse, rather than assuming shape.
+    title?: string
     minimumRequirement?: { greaterThanOrEqualToQuantity?: string } | null
     customerGets?: {
       value: { percentage?: number }
-      items: { products?: { productsToAdd?: string[] } }
+      // Matches the query's `productsToAdd: products` alias directly under
+      // `items` — a real GraphQL connection (edges/node), not a flat array.
+      items: { productsToAdd?: { edges: { node: { id: string } }[] } }
     } | null
   }
 }
 
 function parseDiscount(node: RawDiscountNode): ActualDiscount | null {
   const { title, minimumRequirement, customerGets } = node.automaticDiscount
-  if (!title.startsWith(TITLE_PREFIX)) return null
+  if (!title || !title.startsWith(TITLE_PREFIX)) return null
 
   const minQty = minimumRequirement?.greaterThanOrEqualToQuantity
   const percentage = customerGets?.value.percentage
-  const productId = customerGets?.items.products?.productsToAdd?.[0]
+  const productId = customerGets?.items.productsToAdd?.edges?.[0]?.node.id
 
   if (!minQty || percentage === undefined || !productId) return null
 
@@ -2301,7 +2338,7 @@ export async function applyActions(actions: Action[]): Promise<Map<string, strin
 npm test -- tests/lib/shopify-discounts.test.ts
 ```
 
-Expected: PASS, 5 tests.
+Expected: PASS, 6 tests.
 
 - [ ] **Step 5: Run the full test suite**
 
