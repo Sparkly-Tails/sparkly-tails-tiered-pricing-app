@@ -62,7 +62,7 @@ export async function listActualDiscounts(): Promise<ActualDiscount[]> {
                 }
                 customerGets {
                   value { ... on DiscountPercentage { percentage } }
-                  items { ... on DiscountProducts { productsToAdd: products { edges { node { id } } } } }
+                  items { ... on DiscountProducts { productsToAdd: products(first: 1) { edges { node { id } } } } }
                 }
               }
             }

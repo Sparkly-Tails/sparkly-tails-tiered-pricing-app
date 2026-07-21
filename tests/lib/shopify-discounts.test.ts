@@ -38,6 +38,23 @@ describe('listActualDiscounts', () => {
     ])
   })
 
+  it('requests the nested products connection with a pagination arg', async () => {
+    // Regression test: Shopify's schema requires `first` or `last` on every
+    // connection field, including the nested `products` connection inside
+    // `customerGets.items`, not just the outer `automaticDiscountNodes`.
+    // Omitting it here previously passed every mocked test (shopifyQuery is
+    // mocked, so the query string is never actually sent to Shopify) but
+    // failed against the real API with "you must provide one of first or
+    // last" the first time a live "Go live" reconcile ran.
+    const spy = vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      automaticDiscountNodes: { edges: [] },
+    })
+
+    await listActualDiscounts()
+
+    expect(spy).toHaveBeenCalledWith(expect.stringMatching(/productsToAdd:\s*products\(first:/))
+  })
+
   it('ignores discounts not created by this app', async () => {
     vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
       automaticDiscountNodes: {
