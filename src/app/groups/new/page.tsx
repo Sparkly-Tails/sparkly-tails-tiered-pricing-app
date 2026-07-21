@@ -16,7 +16,7 @@ export default function NewGroupPage() {
             type="text"
             required
             placeholder="Standard voucher"
-            className="w-full border border-line rounded px-3 py-2"
+            className="w-full border border-line rounded px-3 py-2 transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:border-accent"
           />
         </div>
 
@@ -34,7 +34,7 @@ export default function NewGroupPage() {
                   type="number"
                   min="1"
                   placeholder="Min qty (e.g. 5)"
-                  className="border border-line rounded px-3 py-2 w-40"
+                  className="border border-line rounded px-3 py-2 w-40 transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:border-accent"
                 />
                 <span className="text-sm text-muted">+ units →</span>
                 <label htmlFor={`tier-${i}-percentOff`} className="sr-only">
@@ -48,7 +48,7 @@ export default function NewGroupPage() {
                   max="100"
                   step="0.1"
                   placeholder="% off (e.g. 14.7)"
-                  className="border border-line rounded px-3 py-2 w-40"
+                  className="border border-line rounded px-3 py-2 w-40 transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:border-accent"
                 />
               </div>
             ))}
@@ -59,7 +59,7 @@ export default function NewGroupPage() {
           </p>
         </div>
 
-        <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded">
+        <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
           Create draft group
         </button>
       </form>

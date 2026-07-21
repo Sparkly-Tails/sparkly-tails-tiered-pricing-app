@@ -19,7 +19,7 @@ export default async function Home() {
         <AuthLink
           href="/groups/new"
           token={token}
-          className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded"
+          className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
           New group
         </AuthLink>
@@ -35,7 +35,7 @@ export default async function Home() {
         <ul className="divide-y divide-line">
           {config.groups.map((group) => (
             <li key={group.id} className="py-4">
-              <AuthLink href={`/groups/${group.id}`} token={token} className="font-medium hover:underline">
+              <AuthLink href={`/groups/${group.id}`} token={token} className="font-medium hover:underline transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded">
                 {group.name}
               </AuthLink>
               <p className="text-sm text-muted">

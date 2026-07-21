@@ -121,10 +121,10 @@ export default async function GroupPage({
             aria-labelledby="assigned-products-heading"
             defaultValue={group.productIds.join(', ')}
             placeholder="gid://shopify/Product/123, gid://shopify/Product/456"
-            className="w-full border border-line rounded px-3 py-2 text-sm"
+            className="w-full border border-line rounded px-3 py-2 text-sm transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:border-accent"
             rows={3}
           />
-          <button type="submit" className="bg-surface border border-line hover:bg-line px-4 py-3 rounded text-sm">
+          <button type="submit" className="bg-surface border border-line hover:bg-line px-4 py-3 rounded text-sm transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
             Save product list
           </button>
         </form>
@@ -136,7 +136,7 @@ export default async function GroupPage({
             action={goLive}
             confirmMessage={`Go live with "${group.name}"? This creates real Shopify automatic discounts for ${group.productIds.length} product${group.productIds.length === 1 ? '' : 's'} immediately.`}
           >
-            <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded">
+            <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
               Go live
             </button>
           </ConfirmForm>
@@ -145,7 +145,7 @@ export default async function GroupPage({
             action={goDraft}
             confirmMessage={`Take "${group.name}" offline? This removes its real Shopify automatic discounts immediately.`}
           >
-            <button type="submit" className="bg-danger hover:bg-danger-hover text-white px-4 py-3 rounded">
+            <button type="submit" className="bg-danger hover:bg-danger-hover text-white px-4 py-3 rounded transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger">
               Take offline
             </button>
           </ConfirmForm>
