@@ -4,6 +4,7 @@ import { getConfig } from '@/lib/metafields'
 import { resultingPrice } from '@/lib/tier-math'
 import { getProductInfo } from '@/lib/products'
 import { assignProducts, setGroupStatus } from '@/actions/groupActions'
+import ConfirmForm from '@/components/ConfirmForm'
 
 const MAX_ACTIVE_DISCOUNTS = 25
 
@@ -129,17 +130,23 @@ export default async function GroupPage({
 
       <section>
         {group.status === 'draft' ? (
-          <form action={goLive}>
+          <ConfirmForm
+            action={goLive}
+            confirmMessage={`Go live with "${group.name}"? This creates real Shopify automatic discounts for ${group.productIds.length} product${group.productIds.length === 1 ? '' : 's'} immediately.`}
+          >
             <button type="submit" className="bg-black text-white px-4 py-2 rounded">
               Go live
             </button>
-          </form>
+          </ConfirmForm>
         ) : (
-          <form action={goDraft}>
+          <ConfirmForm
+            action={goDraft}
+            confirmMessage={`Take "${group.name}" offline? This removes its real Shopify automatic discounts immediately.`}
+          >
             <button type="submit" className="bg-red-600 text-white px-4 py-2 rounded">
               Take offline
             </button>
-          </form>
+          </ConfirmForm>
         )}
       </section>
     </main>
