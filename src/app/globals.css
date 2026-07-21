@@ -1,1 +1,50 @@
 @import "tailwindcss";
+
+:root {
+  --background: oklch(99% 0.003 145);
+  --surface: oklch(97% 0.006 145);
+  --line: oklch(88% 0.01 145);
+  --foreground: oklch(20% 0.01 145);
+  --muted: oklch(45% 0.01 145);
+  --subtle: oklch(55% 0.01 145);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(18% 0.012 145);
+    --surface: oklch(23% 0.014 145);
+    --line: oklch(34% 0.014 145);
+    --foreground: oklch(92% 0.006 145);
+    --muted: oklch(72% 0.012 145);
+    --subtle: oklch(64% 0.012 145);
+  }
+}
+
+/* Accent and danger are deliberately theme-invariant: they're small,
+   solid, high-chroma button fills always paired with white text, not
+   large surfaces — keeping them mid-dark in both themes is what keeps
+   that pairing readable whether the page is light or dark. */
+:root {
+  --accent: oklch(42% 0.15 155);
+  --accent-hover: oklch(35% 0.15 155);
+  --danger: oklch(50% 0.19 25);
+  --danger-hover: oklch(43% 0.19 25);
+}
+
+@theme {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-line: var(--line);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+}

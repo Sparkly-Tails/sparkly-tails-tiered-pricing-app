@@ -18,7 +18,7 @@ export default async function RootLayout({
     <html lang="en">
       <body>
         <AuthTokenInit initialToken={authToken} />
-        <div className="text-xs text-gray-400 text-right px-4 pt-1">
+        <div className="text-xs text-subtle text-right px-4 pt-1">
           v{packageJson.version}
         </div>
         {children}

@@ -16,7 +16,7 @@ export default function NewGroupPage() {
             type="text"
             required
             placeholder="Standard voucher"
-            className="w-full border rounded px-3 py-2"
+            className="w-full border border-line rounded px-3 py-2"
           />
         </div>
 
@@ -34,9 +34,9 @@ export default function NewGroupPage() {
                   type="number"
                   min="1"
                   placeholder="Min qty (e.g. 5)"
-                  className="border rounded px-3 py-2 w-40"
+                  className="border border-line rounded px-3 py-2 w-40"
                 />
-                <span className="text-sm text-gray-500">+ units →</span>
+                <span className="text-sm text-muted">+ units →</span>
                 <label htmlFor={`tier-${i}-percentOff`} className="sr-only">
                   Tier {i + 1} percent off
                 </label>
@@ -48,18 +48,18 @@ export default function NewGroupPage() {
                   max="100"
                   step="0.1"
                   placeholder="% off (e.g. 14.7)"
-                  className="border rounded px-3 py-2 w-40"
+                  className="border border-line rounded px-3 py-2 w-40"
                 />
               </div>
             ))}
           </div>
-          <p className="text-xs text-gray-500 mt-2">
+          <p className="text-xs text-muted mt-2">
             Enter percent-off directly. The next screen shows the actual
             resulting price for each assigned product before you save.
           </p>
         </div>
 
-        <button type="submit" className="bg-black text-white px-4 py-2 rounded">
+        <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-2 rounded">
           Create draft group
         </button>
       </form>

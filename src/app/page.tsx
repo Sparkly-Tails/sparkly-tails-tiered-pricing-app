@@ -19,26 +19,26 @@ export default async function Home() {
         <AuthLink
           href="/groups/new"
           token={token}
-          className="bg-black text-white px-4 py-2 rounded"
+          className="bg-accent hover:bg-accent-hover text-white px-4 py-2 rounded"
         >
           New group
         </AuthLink>
       </div>
 
-      <p className="text-sm text-gray-600 mb-6">
+      <p className="text-sm text-muted mb-6">
         {slotsUsed} of {MAX_ACTIVE_DISCOUNTS} discount slots used
       </p>
 
       {config.groups.length === 0 ? (
-        <p className="text-gray-500">No tier groups yet.</p>
+        <p className="text-muted">No tier groups yet.</p>
       ) : (
-        <ul className="divide-y">
+        <ul className="divide-y divide-line">
           {config.groups.map((group) => (
             <li key={group.id} className="py-4">
               <AuthLink href={`/groups/${group.id}`} token={token} className="font-medium hover:underline">
                 {group.name}
               </AuthLink>
-              <p className="text-sm text-gray-500">
+              <p className="text-sm text-muted">
                 {group.status} · {group.tiers.length} tiers · {group.productIds.length} products
               </p>
             </li>
