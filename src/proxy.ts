@@ -42,17 +42,8 @@ export async function proxy(req: NextRequest) {
   const shop = process.env.SHOPIFY_SHOP
 
   if (!secret || !apiKey || !shop) {
-    // TEMPORARY diagnostic — names which var(s) are missing (booleans only,
-    // never the actual secret values) so a live deploy issue can be
-    // confirmed without needing NODE_ENV=development. Revert to the plain
-    // message below once the install issue is resolved.
     return NextResponse.json(
-      {
-        error: 'App misconfigured: missing env vars',
-        SHOPIFY_API_SECRET_KEY_set: !!secret,
-        NEXT_PUBLIC_SHOPIFY_API_KEY_set: !!apiKey,
-        SHOPIFY_SHOP_set: !!shop,
-      },
+      { error: 'App misconfigured: missing env vars' },
       { status: 503 },
     )
   }
