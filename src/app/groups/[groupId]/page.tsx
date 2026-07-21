@@ -75,38 +75,40 @@ export default async function GroupPage({
         {productPreviews.length === 0 ? (
           <p className="text-sm text-muted">No products assigned yet.</p>
         ) : (
-          <table className="w-full text-sm border-collapse">
-            <thead>
-              <tr className="text-left border-b border-line">
-                <th className="py-1">Product</th>
-                <th className="py-1">Base price</th>
-                {group.tiers.map((tier) => (
-                  <th key={tier.minQty} className="py-1">{tier.minQty}+</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {productPreviews.map(({ productId, info }) => (
-                <tr key={productId} className="border-b border-line">
-                  {info ? (
-                    <>
-                      <td className="py-1">{info.title}</td>
-                      <td className="py-1">£{info.basePrice.toFixed(2)}</td>
-                      {group.tiers.map((tier) => (
-                        <td key={tier.minQty} className="py-1">
-                          £{resultingPrice(info.basePrice, tier.percentOff).toFixed(2)}
-                        </td>
-                      ))}
-                    </>
-                  ) : (
-                    <td colSpan={2 + group.tiers.length} className="py-1 text-danger">
-                      {productId} — product not found, will be skipped
-                    </td>
-                  )}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm border-collapse">
+              <thead>
+                <tr className="text-left border-b border-line">
+                  <th className="py-1">Product</th>
+                  <th className="py-1">Base price</th>
+                  {group.tiers.map((tier) => (
+                    <th key={tier.minQty} className="py-1">{tier.minQty}+</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {productPreviews.map(({ productId, info }) => (
+                  <tr key={productId} className="border-b border-line">
+                    {info ? (
+                      <>
+                        <td className="py-1">{info.title}</td>
+                        <td className="py-1">£{info.basePrice.toFixed(2)}</td>
+                        {group.tiers.map((tier) => (
+                          <td key={tier.minQty} className="py-1">
+                            £{resultingPrice(info.basePrice, tier.percentOff).toFixed(2)}
+                          </td>
+                        ))}
+                      </>
+                    ) : (
+                      <td colSpan={2 + group.tiers.length} className="py-1 text-danger">
+                        {productId} — product not found, will be skipped
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </section>
 
@@ -122,7 +124,7 @@ export default async function GroupPage({
             className="w-full border border-line rounded px-3 py-2 text-sm"
             rows={3}
           />
-          <button type="submit" className="bg-surface border border-line hover:bg-line px-4 py-2 rounded text-sm">
+          <button type="submit" className="bg-surface border border-line hover:bg-line px-4 py-3 rounded text-sm">
             Save product list
           </button>
         </form>
@@ -134,7 +136,7 @@ export default async function GroupPage({
             action={goLive}
             confirmMessage={`Go live with "${group.name}"? This creates real Shopify automatic discounts for ${group.productIds.length} product${group.productIds.length === 1 ? '' : 's'} immediately.`}
           >
-            <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-2 rounded">
+            <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded">
               Go live
             </button>
           </ConfirmForm>
@@ -143,7 +145,7 @@ export default async function GroupPage({
             action={goDraft}
             confirmMessage={`Take "${group.name}" offline? This removes its real Shopify automatic discounts immediately.`}
           >
-            <button type="submit" className="bg-danger hover:bg-danger-hover text-white px-4 py-2 rounded">
+            <button type="submit" className="bg-danger hover:bg-danger-hover text-white px-4 py-3 rounded">
               Take offline
             </button>
           </ConfirmForm>

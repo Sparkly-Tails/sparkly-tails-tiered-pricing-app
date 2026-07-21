@@ -24,7 +24,7 @@ export default function NewGroupPage() {
           <p className="block text-sm font-medium mb-2">Tiers</p>
           <div className="space-y-2">
             {[0, 1].map((i) => (
-              <div key={i} className="flex gap-2 items-center">
+              <div key={i} className="flex flex-wrap gap-2 items-center">
                 <label htmlFor={`tier-${i}-minQty`} className="sr-only">
                   Tier {i + 1} minimum quantity
                 </label>
@@ -59,7 +59,7 @@ export default function NewGroupPage() {
           </p>
         </div>
 
-        <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-2 rounded">
+        <button type="submit" className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded">
           Create draft group
         </button>
       </form>

@@ -19,7 +19,7 @@ export default async function Home() {
         <AuthLink
           href="/groups/new"
           token={token}
-          className="bg-accent hover:bg-accent-hover text-white px-4 py-2 rounded"
+          className="bg-accent hover:bg-accent-hover text-white px-4 py-3 rounded"
         >
           New group
         </AuthLink>
