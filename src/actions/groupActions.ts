@@ -13,7 +13,7 @@ import { randomUUID } from 'crypto'
 import { reconcile } from '@/lib/reconciler'
 import { listActualDiscounts, applyActions } from '@/lib/shopify-discounts'
 import { resultingPrice } from '@/lib/tier-math'
-import { getProductInfo } from '@/lib/products'
+import { getProductInfoBatch } from '@/lib/products'
 
 /**
  * Runs the reconciler against `config` and, if it succeeds, applies the
@@ -77,9 +77,16 @@ async function reconcileAndSync(config: Config, group: TierGroup): Promise<void>
   // operation: the discount reconciliation above has already succeeded
   // and is the real pricing engine, so a decorative storefront-widget
   // metafield for one bad id shouldn't roll it back.
+  // Fetch every product's real price in one batched request (impeccable
+  // optimize pass) rather than one GraphQL call per product in the loop
+  // below — this ran sequentially before, so a group near its slot
+  // ceiling meant a save that got slower with every product added.
+  const productInfoMap =
+    group.status === 'live' ? await getProductInfoBatch(group.productIds) : new Map()
+
   for (const productId of group.productIds) {
     if (group.status === 'live') {
-      const info = await getProductInfo(productId)
+      const info = productInfoMap.get(productId)
       if (!info) {
         console.error(`[reconcileAndSync] skipping product tier sync: ${productId} not found`)
         continue

@@ -2,7 +2,7 @@ import { headers } from 'next/headers'
 import { notFound } from 'next/navigation'
 import { getConfig } from '@/lib/metafields'
 import { resultingPrice } from '@/lib/tier-math'
-import { getProductInfo } from '@/lib/products'
+import { getProductInfoBatch } from '@/lib/products'
 import { assignProducts, setGroupStatus } from '@/actions/groupActions'
 import ConfirmForm from '@/components/ConfirmForm'
 
@@ -30,17 +30,17 @@ export default async function GroupPage({
   const goLive = setGroupStatus.bind(null, groupId, 'live')
   const goDraft = setGroupStatus.bind(null, groupId, 'draft')
 
-  // Real per-product pricing preview: fetch each assigned product's actual
-  // Shopify price (Task 9) so the table below shows the exact resulting
-  // price the discount will produce — never an example or placeholder. A
-  // stale product id (deleted product, typo) resolves to null and is
-  // shown as a visible warning row instead of crashing the page.
-  const productPreviews = await Promise.all(
-    group.productIds.map(async (productId) => ({
-      productId,
-      info: await getProductInfo(productId),
-    })),
-  )
+  // Real per-product pricing preview: fetch every assigned product's
+  // actual Shopify price in one batched request (Task 9 + impeccable
+  // optimize pass) so the table below shows the exact resulting price the
+  // discount will produce — never an example or placeholder. A stale
+  // product id (deleted product, typo) resolves to null and is shown as a
+  // visible warning row instead of crashing the page.
+  const productInfoMap = await getProductInfoBatch(group.productIds)
+  const productPreviews = group.productIds.map((productId) => ({
+    productId,
+    info: productInfoMap.get(productId) ?? null,
+  }))
 
   return (
     <main className="p-8 max-w-2xl mx-auto">

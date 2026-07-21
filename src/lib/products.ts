@@ -40,3 +40,65 @@ export async function getProductInfo(productId: string): Promise<ProductInfo | n
     basePrice: parseFloat(firstVariant.price),
   }
 }
+
+interface RawProductNode {
+  id: string
+  title: string
+  variants: { edges: { node: { price: string } }[] }
+}
+
+/**
+ * Batched form of getProductInfo: fetches every product in one round-trip
+ * via Shopify's `nodes(ids:)` query instead of N single-product queries.
+ * Used wherever a whole group's products are previewed or reconciled at
+ * once, so a group near its slot ceiling doesn't fire one GraphQL request
+ * per product on every page load or save.
+ *
+ * Returns a Map covering every id in `productIds`, including ones that
+ * don't resolve to a real product (deleted product, typo'd gid, or the
+ * `... on Product` fragment not matching a differently-typed node) — those
+ * map to `null` rather than being silently absent, so callers don't need
+ * a separate "was this id even requested" check.
+ */
+export async function getProductInfoBatch(
+  productIds: string[],
+): Promise<Map<string, ProductInfo | null>> {
+  const result = new Map<string, ProductInfo | null>()
+  if (productIds.length === 0) return result
+
+  const data = await shopifyQuery<{
+    nodes: (RawProductNode | null)[]
+  }>(
+    `query getProductInfoBatch($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on Product {
+          id
+          title
+          variants(first: 1) {
+            edges { node { price } }
+          }
+        }
+      }
+    }`,
+    { ids: productIds },
+  )
+
+  for (const node of data.nodes) {
+    if (!node) continue
+    const firstVariant = node.variants.edges[0]?.node
+    result.set(
+      node.id,
+      firstVariant ? { title: node.title, basePrice: parseFloat(firstVariant.price) } : null,
+    )
+  }
+
+  // Ensure every requested id has an entry even if Shopify's response
+  // omitted it (deleted product, typo'd gid, or a node whose type didn't
+  // match the `... on Product` fragment) — callers can then tell "not
+  // found" apart from "never asked about" without extra bookkeeping.
+  for (const id of productIds) {
+    if (!result.has(id)) result.set(id, null)
+  }
+
+  return result
+}
