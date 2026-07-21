@@ -1,4 +1,5 @@
 import { createGroup } from '@/actions/groupActions'
+import TierFields from '@/components/TierFields'
 
 export default function NewGroupPage() {
   return (
@@ -22,37 +23,7 @@ export default function NewGroupPage() {
 
         <div>
           <p className="block text-sm font-medium mb-2">Tiers</p>
-          <div className="space-y-2">
-            {[0, 1].map((i) => (
-              <div key={i} className="flex flex-wrap gap-2 items-center">
-                <label htmlFor={`tier-${i}-minQty`} className="sr-only">
-                  Tier {i + 1} minimum quantity
-                </label>
-                <input
-                  id={`tier-${i}-minQty`}
-                  name={`tier-${i}-minQty`}
-                  type="number"
-                  min="1"
-                  placeholder="Min qty (e.g. 5)"
-                  className="border border-line rounded px-3 py-2 w-40 transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:border-accent"
-                />
-                <span className="text-sm text-muted">+ units →</span>
-                <label htmlFor={`tier-${i}-percentOff`} className="sr-only">
-                  Tier {i + 1} percent off
-                </label>
-                <input
-                  id={`tier-${i}-percentOff`}
-                  name={`tier-${i}-percentOff`}
-                  type="number"
-                  min="0"
-                  max="100"
-                  step="0.1"
-                  placeholder="% off (e.g. 14.7)"
-                  className="border border-line rounded px-3 py-2 w-40 transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:border-accent"
-                />
-              </div>
-            ))}
-          </div>
+          <TierFields />
           <p className="text-xs text-muted mt-2">
             Enter percent-off directly. The next screen shows the actual
             resulting price for each assigned product before you save.

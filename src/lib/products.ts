@@ -102,3 +102,33 @@ export async function getProductInfoBatch(
 
   return result
 }
+
+export interface ProductSearchResult {
+  id: string
+  title: string
+}
+
+/**
+ * Search-as-you-type lookup for the "assigned products" picker: returns
+ * real product ids (unlike a title-only suggestion list), since the
+ * caller needs the gid to add to a group's productIds. Empty/whitespace
+ * query short-circuits to no results without a network call, matching
+ * the picker's debounce, which only fires once the user has typed enough
+ * to search.
+ */
+export async function searchProducts(query: string): Promise<ProductSearchResult[]> {
+  if (!query.trim()) return []
+
+  const data = await shopifyQuery<{
+    products: { edges: { node: { id: string; title: string } }[] }
+  }>(
+    `query searchProducts($q: String!) {
+      products(first: 8, query: $q) {
+        edges { node { id title } }
+      }
+    }`,
+    { q: query },
+  )
+
+  return data.products.edges.map((e) => e.node)
+}

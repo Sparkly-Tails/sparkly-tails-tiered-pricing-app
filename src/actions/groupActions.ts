@@ -13,7 +13,7 @@ import { randomUUID } from 'crypto'
 import { reconcile } from '@/lib/reconciler'
 import { listActualDiscounts, applyActions } from '@/lib/shopify-discounts'
 import { resultingPrice } from '@/lib/tier-math'
-import { getProductInfoBatch } from '@/lib/products'
+import { getProductInfoBatch, searchProducts, type ProductSearchResult } from '@/lib/products'
 
 /**
  * Runs the reconciler against `config` and, if it succeeds, applies the
@@ -206,4 +206,19 @@ export async function setGroupStatus(groupId: string, status: 'draft' | 'live'):
   }
 
   await redirectWithToken(`/groups/${groupId}`)
+}
+
+/**
+ * Backs the assigned-products search box. Swallows errors and returns no
+ * results rather than throwing — this fires on every debounced keystroke,
+ * so a transient Shopify API hiccup should read as "no matches" and let
+ * the user keep typing, not crash the page.
+ */
+export async function searchProductsAction(query: string): Promise<ProductSearchResult[]> {
+  try {
+    return await searchProducts(query)
+  } catch (err) {
+    console.error('[searchProductsAction] search failed:', err)
+    return []
+  }
 }

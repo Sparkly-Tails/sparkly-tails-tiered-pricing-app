@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { getProductInfo, getProductInfoBatch } from '@/lib/products'
+import { getProductInfo, getProductInfoBatch, searchProducts } from '@/lib/products'
 import * as shopifyClient from '@/lib/shopify-client'
 
 describe('getProductInfo', () => {
@@ -95,6 +95,37 @@ describe('getProductInfoBatch', () => {
     const result = await getProductInfoBatch([])
 
     expect(result.size).toBe(0)
+    expect(spy).not.toHaveBeenCalled()
+  })
+})
+
+describe('searchProducts', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  it('returns matching products with real ids', async () => {
+    const spy = vi.spyOn(shopifyClient, 'shopifyQuery').mockResolvedValue({
+      products: {
+        edges: [
+          { node: { id: 'gid://shopify/Product/111', title: 'Chicken Voucher' } },
+          { node: { id: 'gid://shopify/Product/222', title: 'Chicken Treats' } },
+        ],
+      },
+    })
+
+    const result = await searchProducts('chicken')
+    expect(result).toEqual([
+      { id: 'gid://shopify/Product/111', title: 'Chicken Voucher' },
+      { id: 'gid://shopify/Product/222', title: 'Chicken Treats' },
+    ])
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('products(first: 8'), { q: 'chicken' })
+  })
+
+  it('returns an empty array without calling shopifyQuery for a blank query', async () => {
+    const spy = vi.spyOn(shopifyClient, 'shopifyQuery')
+
+    const result = await searchProducts('   ')
+
+    expect(result).toEqual([])
     expect(spy).not.toHaveBeenCalled()
   })
 })

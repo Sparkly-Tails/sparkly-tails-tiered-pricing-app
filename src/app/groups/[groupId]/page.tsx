@@ -5,6 +5,7 @@ import { resultingPrice } from '@/lib/tier-math'
 import { getProductInfoBatch } from '@/lib/products'
 import { assignProducts, setGroupStatus } from '@/actions/groupActions'
 import ConfirmForm from '@/components/ConfirmForm'
+import ProductPicker from '@/components/ProductPicker'
 
 const MAX_ACTIVE_DISCOUNTS = 25
 
@@ -40,6 +41,10 @@ export default async function GroupPage({
   const productPreviews = group.productIds.map((productId) => ({
     productId,
     info: productInfoMap.get(productId) ?? null,
+  }))
+  const initialProducts = productPreviews.map(({ productId, info }) => ({
+    id: productId,
+    title: info ? info.title : `${productId} — not found`,
   }))
 
   return (
@@ -113,17 +118,9 @@ export default async function GroupPage({
       </section>
 
       <section className="mb-8">
-        <h2 id="assigned-products-heading" className="font-medium mb-2">Assigned products</h2>
-        <form action={assignProductsWithId} className="space-y-2">
-          <textarea
-            id="productIds"
-            name="productIds"
-            aria-labelledby="assigned-products-heading"
-            defaultValue={group.productIds.join(', ')}
-            placeholder="gid://shopify/Product/123, gid://shopify/Product/456"
-            className="w-full border border-line rounded px-3 py-2 text-sm transition-colors duration-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:border-accent"
-            rows={3}
-          />
+        <h2 className="font-medium mb-2">Assigned products</h2>
+        <form action={assignProductsWithId} className="space-y-3">
+          <ProductPicker initialProducts={initialProducts} />
           <button type="submit" className="bg-surface border border-line hover:bg-line px-4 py-3 rounded text-sm transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
             Save product list
           </button>
