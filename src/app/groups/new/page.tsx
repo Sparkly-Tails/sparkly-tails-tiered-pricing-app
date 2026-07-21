@@ -25,7 +25,11 @@ export default function NewGroupPage() {
           <div className="space-y-2">
             {[0, 1].map((i) => (
               <div key={i} className="flex gap-2 items-center">
+                <label htmlFor={`tier-${i}-minQty`} className="sr-only">
+                  Tier {i + 1} minimum quantity
+                </label>
                 <input
+                  id={`tier-${i}-minQty`}
                   name={`tier-${i}-minQty`}
                   type="number"
                   min="1"
@@ -33,7 +37,11 @@ export default function NewGroupPage() {
                   className="border rounded px-3 py-2 w-40"
                 />
                 <span className="text-sm text-gray-500">+ units →</span>
+                <label htmlFor={`tier-${i}-percentOff`} className="sr-only">
+                  Tier {i + 1} percent off
+                </label>
                 <input
+                  id={`tier-${i}-percentOff`}
                   name={`tier-${i}-percentOff`}
                   type="number"
                   min="0"

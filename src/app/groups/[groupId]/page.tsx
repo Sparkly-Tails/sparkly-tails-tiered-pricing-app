@@ -110,10 +110,12 @@ export default async function GroupPage({
       </section>
 
       <section className="mb-8">
-        <h2 className="font-medium mb-2">Assigned products</h2>
+        <h2 id="assigned-products-heading" className="font-medium mb-2">Assigned products</h2>
         <form action={assignProductsWithId} className="space-y-2">
           <textarea
+            id="productIds"
             name="productIds"
+            aria-labelledby="assigned-products-heading"
             defaultValue={group.productIds.join(', ')}
             placeholder="gid://shopify/Product/123, gid://shopify/Product/456"
             className="w-full border rounded px-3 py-2 text-sm"

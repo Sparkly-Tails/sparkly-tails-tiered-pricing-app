@@ -1,0 +1,14 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sparkly-tails-tiered-pricing-app",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-c",
+        "cd /Users/rubencamposdeteba/Documents/sparkly-tails-tiered-pricing-app && source $HOME/.nvm/nvm.sh && nvm use 20.20.2 && npm run dev -- -p 3010"
+      ],
+      "port": 3010
+    }
+  ]
+}
