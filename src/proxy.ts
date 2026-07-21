@@ -42,7 +42,19 @@ export async function proxy(req: NextRequest) {
   const shop = process.env.SHOPIFY_SHOP
 
   if (!secret || !apiKey || !shop) {
-    return new NextResponse('App misconfigured: missing env vars (503)', { status: 503 })
+    // TEMPORARY diagnostic — names which var(s) are missing (booleans only,
+    // never the actual secret values) so a live deploy issue can be
+    // confirmed without needing NODE_ENV=development. Revert to the plain
+    // message below once the install issue is resolved.
+    return NextResponse.json(
+      {
+        error: 'App misconfigured: missing env vars',
+        SHOPIFY_API_SECRET_KEY_set: !!secret,
+        NEXT_PUBLIC_SHOPIFY_API_KEY_set: !!apiKey,
+        SHOPIFY_SHOP_set: !!shop,
+      },
+      { status: 503 },
+    )
   }
 
   if (searchParams.has('hmac') && searchParams.has('shop')) {
